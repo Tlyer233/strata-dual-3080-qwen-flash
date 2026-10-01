@@ -1,0 +1,68 @@
+{
+ "exe": "/home/xi/src/Strata/engine/strata",
+ "args": [
+  "--pack",
+  "/home/xi/src/Strata-data/packs/swift-iq3_xxs",
+  "--native",
+  "/home/xi/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "--ple-gguf",
+  "/home/xi/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/xi/src/Strata/data/expert-profile.bin",
+  "--mtp",
+  "/home/xi/src/Strata-data/mtp/rt",
+  "--vision",
+  "--max-context",
+  "206848",
+  "--kv",
+  "k8v4",
+  "--spec",
+  "6",
+  "--mtp-max-t",
+  "4",
+  "--suffix-draft",
+  "3",
+  "--spec-min-p",
+  "0.5",
+  "--prefill",
+  "2048",
+  "--expert-cache",
+  "auto",
+  "--vram-reserve-mib",
+  "800"
+ ],
+ "cwd": "/home/xi/src/Strata",
+ "tokenizer": "/home/xi/src/Strata-data/packs/swift-iq3_xxs/tokenizer",
+ "model_name": "swift-1.5-iq3_xxs",
+ "log": "/home/xi/src/Strata/strata-swift-iq3_xxs.log",
+ "lib_dirs": [
+  "/home/xi/venvs/sglang-0519/lib/python3.12/site-packages/nvidia/cu13/bin",
+  "/home/xi/venvs/sglang-0519/lib/python3.12/site-packages/nvidia/cu13/lib64"
+ ],
+ "port": 8005,
+ "host": "0.0.0.0",
+ "fit_max_tokens": true,
+ "gpu": [
+  1,
+  0
+ ],
+ "gpus_asked": true,
+ "layer_split": "26",
+ "draft_vocab": "cjk",
+ "vision": {
+  "exe": "/home/xi/src/Strata/engine/strata-vision",
+  "mmproj": "/home/xi/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "/home/xi/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "gpu": true,
+  "max_tokens": 1024
+ },
+ "sampling": {
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 20,
+  "min_p": 0.0,
+  "presence_penalty": 0.0,
+  "repetition_penalty": 1.0,
+  "force": true
+ }
+}
