@@ -1,6 +1,6 @@
 {
   "source": "local",
-  "version": "0.1.31",
+  "version": "0.1.38",
   "archs": [86],
   "vision": "gpu",
   "vision_archs": [86],

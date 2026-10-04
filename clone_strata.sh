@@ -2,7 +2,7 @@
 # Shallow clone Strata via gh-proxy (03_downloads_mirrors.md).
 set -euo pipefail
 DEST="${STRATA_ROOT:-$HOME/src/Strata}"
-TAG="${STRATA_TAG:-v0.1.31}"
+TAG="${STRATA_TAG:-v0.1.38}"
 ZIP="https://gh-proxy.com/https://github.com/Niko1221/Strata/archive/refs/tags/${TAG}.zip"
 if [[ -f "$DEST/setup.py" ]]; then
   echo "already have $DEST" >&2

@@ -1,0 +1,294 @@
+# Dual-GPU --resident-experts on a layer split. Not merged in Niko1221/Strata v0.1.38.
+# GPU expert caches fill first; RAM gets only the experts no card holds; PLE/n-gram stay on the GGUF.
+# Apply from the Strata tree after clone: patch -p1 < patches/resident-on-split-v0.1.38.patch
+# (patches/apply_local.py does this.)
+#
+# Upstream:
+#   https://github.com/Niko1221/Strata/issues/604  resident-on-split still on the list
+#   https://github.com/Niko1221/Strata/issues/364  dual GPU + low RAM -> mmap workaround
+#   https://github.com/Niko1221/Strata/issues/384  layer split + resident rewritten to mmap
+#   https://github.com/Niko1221/Strata/issues/498  UD-Q4 split has no RAM budget (~135 GB)
+#   https://github.com/Niko1221/Strata/issues/730  budget alloc fail -> empty RAM / SSD
+#   https://github.com/Niko1221/Strata/issues/737  #498 follow-up: split just below 135 GB
+#   https://github.com/Niko1221/Strata/pull/639    layer split loads only own dense (more expert VRAM)
+#   https://github.com/Niko1221/Strata/pull/640    STRATA_ARENA_MMAP=1 mapped expert arena
+#   https://github.com/Niko1221/Strata/pull/731    disjoint helper vs primary expert slots
+#
+diff -ruN a/setup.py b/setup.py
+--- a/setup.py	2026-10-04 18:58:14.777053372 +0800
++++ b/setup.py	2026-10-04 18:58:14.770570561 +0800
+@@ -593,19 +593,9 @@
+ 
+ 
+ def split_mmap(cfg: dict) -> bool:
+-    """#364 #384: the low-RAM mode's resident variant (--resident-experts) has no layer split yet.  A config with it
+-    that runs on several GPUs reads the experts the GPUs do not hold through the OS file cache instead
+-    (--mmap-experts: the placement those reports measured 1.3-1.6x faster than one GPU), said plainly - the engine
+-    used to refuse the pair.  True when the config changed."""
+-    a = cfg.get("args", [])
+-    if "--resident-experts" not in a:
+-        return False
+-    a[a.index("--resident-experts")] = "--mmap-experts"
+-    warn("the low-RAM mode's resident variant (--resident-experts) has no layer split yet: on several GPUs the experts "
+-         "the GPUs do not hold are read through the OS file cache (--mmap-experts) instead, and RAM can fill up to 0 "
+-         "free during long prompts. One GPU keeps them in RAM (steady RAM use): START-HERE --setup, or --gpu N for a "
+-         "start")
+-    return True
++    """#364 #384 used to rewrite --resident-experts to --mmap-experts because the engine refused a layer split.
++    generate.cpp now fills each GPU's expert cache first and copies only the experts no card holds into RAM."""
++    return False
+ 
+ 
+ def unsloth_split_need_gb(model="UD-Q4_K_XL") -> float:
+diff -ruN a/src/program/generate.cpp b/src/program/generate.cpp
+--- a/src/program/generate.cpp	2026-10-04 18:58:03.966452552 +0800
++++ b/src/program/generate.cpp	2026-10-04 18:58:03.967786763 +0800
+@@ -128,12 +128,11 @@
+ // reads the file.  Swaps that need no exchange (`out` in the lend region is held in RAM already; or `in` is not) go
+ // on as before; ones beyond the buffers' room wait for a later round.  Runs on the adaptive tier's thread while the
+ // GPU commits and drafts: the copies back are on its stream, and waited for before the refills are queued.
+-template <class Swap>
+-bool resident_stage_swaps(strata::core::FileExpertSource& src, strata::core::ExpertCache& cache,
+-                          const std::vector<int32_t>& host_res, int64_t n_expert, std::vector<Swap>& swaps,
+-                          cudaStream_t stream) {
++template <class Swap, class Locate>
++bool resident_stage_swaps(strata::core::FileExpertSource& src, Locate locate,
++                          const std::vector<int32_t>& host_res, int64_t n_expert, std::vector<Swap>& swaps) {
+     if (!src.complement_ready() || swaps.empty()) return true;
+-    struct Staged { int32_t layer, in, out; int64_t q; };
++    struct Staged { int32_t layer, in, out; int64_t q; cudaStream_t stream; };
+     std::vector<Staged> staged;
+     std::vector<Swap> kept;
+     kept.reserve(swaps.size());
+@@ -143,15 +142,25 @@
+         if (q >= src.exchange_capacity()) continue;
+         const int32_t slot = host_res[(size_t) s.layer * (size_t) n_expert + (size_t) s.out];
+         if (slot < 0) continue;
+-        if (cudaMemcpyAsync(src.exchange_buffer(q), cache.device_slot(slot),
++        strata::core::ExpertCache* cache = nullptr;
++        cudaStream_t stream = nullptr;
++        int dev = -1;
++        locate(s.layer, cache, stream, dev);
++        if (cache == nullptr || stream == nullptr || cache->slot_of(s.layer, s.out) != slot) {
++            kept.push_back(s);
++            continue;
++        }
++        const strata::core::OnDevice on(dev);
++        if (cudaMemcpyAsync(src.exchange_buffer(q), cache->device_slot(slot),
+                             (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer), cudaMemcpyDeviceToHost,
+                             stream) != cudaSuccess)
+             return false;
+-        staged.push_back({s.layer, s.in, s.out, q});
++        staged.push_back({s.layer, s.in, s.out, q, stream});
+         kept.push_back(s);
+     }
+     if (!staged.empty()) {
+-        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
++        for (const Staged& x : staged)
++            if (cudaStreamSynchronize(x.stream) != cudaSuccess) return false;
+         for (const Staged& x : staged)
+             if (!src.stage_exchange(x.layer, x.in, x.out, x.q)) return false;
+     }
+@@ -1418,21 +1427,16 @@
+     }
+     const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
+                                o.expert_cache_remote[2] > 0;
+-    if (o.resident_cpu_experts && !o.layer_split.empty() && !remote_caches && o.resident_soft &&
+-        !o.resident_cpu_explicit && o.resident_budget == 0) {
+-        // #364 #384: setup's --resident-experts with a layer split (--gpus at start, or a config edited by hand) runs
+-        // as the plain mmap mode - the placement those users measured 1.3-1.6x faster than one GPU - instead of
+-        // refusing.  Exactly --mmap-experts: nothing else reads these flags (the headroom only sizes the copy).
+-        std::fprintf(stderr, "strata generate: WARNING: the resident RAM mode (--resident-experts) does not support a "
+-                             "layer split yet: the experts the GPUs do not hold are read through the OS file cache "
+-                             "(--mmap-experts), and RAM may fill up during long prompts\n");
+-        o.resident_cpu_experts = o.resident_pin = o.resident_soft = false;
+-        o.resident_headroom = 8ull << 30;
+-    }
+-    if (o.resident_cpu_experts && (!o.layer_split.empty() || remote_caches)) {
+-        std::fprintf(stderr, "strata generate: --resident-cpu-experts does not support layer splits or remote expert caches\n");
++    if (o.resident_cpu_experts && remote_caches) {
++        std::fprintf(stderr, "strata generate: --resident-cpu-experts does not support remote expert caches\n");
+         return 2;
+     }
++    if (o.resident_cpu_experts && !o.layer_split.empty()) {
++        // #604: GPU caches first, RAM holds only the experts no card holds. setup.py still maps dual-GPU
++        // --resident-experts to plain --mmap-experts (#364 #384); this engine path keeps the complement.
++        std::fprintf(stderr, "strata generate: resident RAM mode with a layer split: each GPU keeps its expert "
++                             "cache; the experts no card holds are copied into RAM (not the full arena, not mmap)\n");
++    }
+     // the helper-GPU expert caches (--expert-cache-remote, docs/SECOND_GPU.md): CUDA1..3 on one GPU; with a layer
+     // split, the visible GPUs no stage runs on, in order
+     int remote_dev[3] = {1, 2, 3};
+@@ -1621,11 +1625,16 @@
+             // every shard of the model (<name>-0000N-of-0000M.gguf beside --native), then the PLE shard: a split
+             // may put any layer in any shard (Swift's GGUFs: layers 13-47 in shard 2, the PLE table in shard 1)
+             o.native_dense_gguf = o.native_shards;
+-            // a PLE-only table (tools/ple_fp8_pack.py: architecture strata-ple) holds no projections
++            // a PLE-only table holds no projections: strata-ple (tools/ple_fp8_pack.py) or a companion
++            // shard with just per_layer_token_embd (sleepyeldrazi Q8_0). Do not add it to native_dense:
++            // its split.no collides with Swift shard 2 (layers 13-47).
+             bool ple_only = false;
+             try {
+                 strata::GgufFile pg(o.ple_gguf);
+                 if (const strata::MetaValue* v = pg.get("general.architecture")) ple_only = v->s == "strata-ple";
++                if (!ple_only && pg.tensors().size() == 1 &&
++                    pg.tensors()[0].name == "per_layer_token_embd.weight")
++                    ple_only = true;
+             } catch (const std::exception&) {}
+             if (!ple_only &&
+                 std::find(o.native_dense_gguf.begin(), o.native_dense_gguf.end(), o.ple_gguf) == o.native_dense_gguf.end())
+@@ -4036,15 +4045,29 @@
+             const int64_t k = plan_lend(chunk);
+             if (k > 0) lend_from = xcache.slots() - k;
+         }
+-        bool resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, {}, lend_from, o.resident_headroom,
+-                                                    o.resident_budget, &profile);
++        std::vector<std::pair<int32_t, int32_t>> extra_gpu;
++        for (auto& stp : stages) {
++            GpuStage& st = *stp;
++            if (!st.cache.valid()) continue;
++            for (int64_t layer = 0; layer < g.n_layers; ++layer) {
++                for (int64_t expert = 0; expert < g.n_expert; ++expert) {
++                    if (st.cache.slot_of(layer, expert) == strata::core::kNotResident) continue;
++                    extra_gpu.emplace_back((int32_t) layer, (int32_t) expert);
++                }
++            }
++        }
++        if (!extra_gpu.empty())
++            std::fprintf(stderr, "strata generate: resident complement omits %zu experts already on later GPUs\n",
++                         extra_gpu.size());
++        bool resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, extra_gpu, lend_from,
++                                                    o.resident_headroom, o.resident_budget, &profile);
+         std::string whole_err;
+         if (!resident_ok && o.resident_soft) {
+             // #467: the whole complement does not fit - keep what does, the hottest by the profile, through the #403
+             // budget path (sized by the RAM alone) instead of none: the misses outside it read the same file bytes
+             // the mmap fallback reads, so the answers are unchanged.  Nothing pinned: the old fallback below.
+             whole_err = err;
+-            resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, {}, -1, o.resident_headroom,
++            resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, extra_gpu, -1, o.resident_headroom,
+                                                    strata::core::FileExpertSource::kResidentWhatFits, &profile);
+             if (resident_ok)
+                 std::fprintf(stderr, "strata generate: WARNING: the whole resident RAM mode does not fit (%s); %.2f "
+@@ -4061,12 +4084,15 @@
+                 std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
+                 return 1;
+             }
+-            std::fprintf(stderr, "strata generate: resident RAM mode: %.2f GiB of experts in RAM (%s), %lld in the GPU "
+-                                 "cache; adaptive swaps %s\n",
++            int64_t gpu_slots = xcache.resident();
++            for (auto& stp : stages)
++                if (stp->cache.valid()) gpu_slots += stp->cache.resident();
++            std::fprintf(stderr, "strata generate: resident RAM mode: %.2f GiB of experts in RAM (%s), %lld in GPU "
++                                 "caches (CUDA0 %lld + later cards); adaptive swaps %s\n",
+                          (double) src.resident_bytes() / 1073741824.0,
+                          src.complement_pinned() ? "page-locked" : src.locked_bytes() > 0 ? "locked" : "pageable",
+-                         (long long) xcache.resident(),
+-                         o.adapt_every > 0 && o.adapt_swaps > 0 ? "exchange them with the GPU cache (no file reads)"
++                         (long long) gpu_slots, (long long) xcache.resident(),
++                         o.adapt_every > 0 && o.adapt_swaps > 0 ? "exchange them with the GPU caches (no file reads)"
+                                                                 : "off");
+         } else if (o.resident_soft) {
+             std::fprintf(stderr, "strata generate: WARNING: the resident RAM mode does not fit (%s); the experts the "
+@@ -4817,7 +4843,20 @@
+             }
+             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
+             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
+-            if (!resident_stage_swaps(src, xcache, host_res, g.n_expert, swaps, adapt_stream)) return false;
++            auto locate_swap = [&](int32_t layer, strata::core::ExpertCache*& cache, cudaStream_t& stream, int& dev) {
++                const int stn = multi_gpu ? stage_of(layer) : 0;
++                if (stn <= 0) {
++                    cache = &xcache;
++                    stream = adapt_stream;
++                    dev = -1;
++                    return;
++                }
++                GpuStage& gs = *stages[(size_t) stn - 1];
++                cache = &gs.cache;
++                stream = gs.adapt_stream;
++                dev = gs.dev;
++            };
++            if (!resident_stage_swaps(src, locate_swap, host_res, g.n_expert, swaps)) return false;
+             bool main_live = false;
+             for (const Swap& s : swaps) {
+                 const size_t in = (size_t) s.layer * g.n_expert + s.in, out = (size_t) s.layer * g.n_expert + s.out;
+@@ -6494,7 +6533,20 @@
+             }
+             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
+             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
+-            if (!resident_stage_swaps(src, xcache, host_res, g.n_expert, swaps, adapt_stream)) {
++            auto locate_swap = [&](int32_t layer, strata::core::ExpertCache*& cache, cudaStream_t& stream, int& dev) {
++                const int stn = multi_gpu ? stage_of(layer) : 0;
++                if (stn <= 0) {
++                    cache = &xcache;
++                    stream = adapt_stream;
++                    dev = -1;
++                    return;
++                }
++                GpuStage& gs = *stages[(size_t) stn - 1];
++                cache = &gs.cache;
++                stream = gs.adapt_stream;
++                dev = gs.dev;
++            };
++            if (!resident_stage_swaps(src, locate_swap, host_res, g.n_expert, swaps)) {
+                 std::fprintf(stderr, "strata generate: an adaptive refill failed (copying evicted experts back)\n");
+                 return false;
+             }
+@@ -6503,9 +6555,13 @@
+                 const int32_t slot = host_res[out];
+                 const uint8_t* b = srcp->blob(s.layer, s.in);
+                 // asynchronous: the copies run while the MTP drafts; the next window waits for them
++                const int stn = multi_gpu ? stage_of(s.layer) : 0;
++                GpuStage* gs = stn > 0 ? stages[(size_t) stn - 1].get() : nullptr;
++                const strata::core::OnDevice on(gs ? gs->dev : -1);
+                 if (slot < 0 || b == nullptr ||
+-                    cudaMemcpyAsync(xcache.device_slot(slot), b, (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer),
+-                                    cudaMemcpyHostToDevice, adapt_stream) != cudaSuccess) {
++                    cudaMemcpyAsync(gs ? gs->cache.device_slot(slot) : xcache.device_slot(slot), b,
++                                    (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer),
++                                    cudaMemcpyHostToDevice, gs ? gs->adapt_stream : adapt_stream) != cudaSuccess) {
+                     std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
+                     return false;
+                 }
+diff -ruN a/tools/test_setup_risk.py b/tools/test_setup_risk.py
+--- a/tools/test_setup_risk.py	2026-10-04 18:58:04.649773954 +0800
++++ b/tools/test_setup_risk.py	2026-10-04 18:58:04.652380889 +0800
+@@ -246,17 +246,15 @@
+ 
+ 
+ class StartOnSeveralGpus(unittest.TestCase):
+-    """A resident low-RAM config started on several GPUs reads the experts through the file cache (#364 #384)."""
++    """Dual-GPU --resident-experts stays resident: GPU caches first, complement in RAM."""
+ 
+     def test_split_mmap(self):
+         cfg = {"args": ["--pack", "p", "--resident-experts", "--kv", "int8"]}
+         out = io.StringIO()
+         with contextlib.redirect_stdout(out):
+-            self.assertTrue(setup.split_mmap(cfg))
+             self.assertFalse(setup.split_mmap(cfg))
+             self.assertFalse(setup.split_mmap({"args": ["--mmap-experts"]}))
+-        self.assertEqual(cfg["args"], ["--pack", "p", "--mmap-experts", "--kv", "int8"])
+-        self.assertIn("no layer split yet", out.getvalue())
++        self.assertEqual(cfg["args"], ["--pack", "p", "--resident-experts", "--kv", "int8"])
+ 
+     def offer(self, args, stdin):
+         found = PROFILES["32GB-2x24GB"][1]
+@@ -276,7 +274,7 @@
+         code, out, asked, cfg = self.offer(["--resident-experts"], "y")
+         self.assertIn("[n]", asked[0])
+         self.assertEqual(cfg["gpu"], [0, 1])
+-        self.assertEqual(cfg["args"], ["--mmap-experts"])
++        self.assertEqual(cfg["args"], ["--resident-experts"])
+         code, out, asked, cfg = self.offer(["--mmap-experts"], None)           # other configs: as before
+         self.assertEqual(cfg["gpu"], [0, 1])
+ 
+@@ -296,8 +294,7 @@
+             cfg = json.loads(p.read_text())
+         self.assertIsNone(code, out)
+         self.assertEqual(cfg["gpu"], [0, 1])
+-        self.assertEqual(cfg["args"], ["--mmap-experts"])
+-        self.assertIn("no layer split yet", out)
++        self.assertEqual(cfg["args"], ["--resident-experts"])
+         self.assertTrue(call.called)
+ 
+ 

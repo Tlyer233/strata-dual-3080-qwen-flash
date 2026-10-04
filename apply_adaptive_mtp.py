@@ -78,6 +78,10 @@ def main() -> int:
     ap.add_argument("--layer-split", default="26")
     ap.add_argument("--mtp", default="",
                     help="engine --mtp dir (empty: leave whatever setup wrote)")
+    ap.add_argument("--resident-experts", action="store_true",
+                    help="GPU expert caches first, complement in RAM. IQ4 dual-GPU only.")
+    ap.add_argument("--mmap-experts", action="store_true",
+                    help="Map experts from GGUF; RAM stays empty. Do not pass from IQ3.")
     ap.add_argument("--chat-template", default="",
                     help="copy this jinja over the pack tokenizer chat_template.jinja")
     a = ap.parse_args()
@@ -100,6 +104,17 @@ def main() -> int:
     args = upsert(args, "--vram-reserve-mib", a.vram_reserve_mib)
     if a.mtp:
         args = upsert(args, "--mtp", a.mtp)
+    if a.mmap_experts:
+        args = drop(args, "--resident-experts", 0)
+        args = drop(args, "--mmap-experts", 0)
+        args.append("--mmap-experts")
+    elif a.resident_experts:
+        args = drop(args, "--mmap-experts", 0)
+        args = drop(args, "--resident-experts", 0)
+        args.append("--resident-experts")
+    else:
+        args = drop(args, "--mmap-experts", 0)
+        args = drop(args, "--resident-experts", 0)
     cfg["args"] = args
     cfg["gpu"] = [1, 0]
     cfg["host"] = "0.0.0.0"
@@ -135,6 +150,8 @@ def main() -> int:
           "--prefill", a.prefill, "--expert-cache", a.expert_cache,
           "--vram-reserve-mib", a.vram_reserve_mib,
           "--mtp", a.mtp or "(unchanged)")
+    if a.resident_experts:
+        print("  --resident-experts (GPU caches first, complement in RAM)")
     print("  gpus 1,0  layer-split", a.layer_split, "(GPU0 desktop is the later stage)")
     print("  host 0.0.0.0  (Tailscale / LAN)")
     print("  fit_max_tokens=true  (clamp max_tokens instead of 400)")

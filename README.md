@@ -1,10 +1,17 @@
-# AGENT: strata-swift-iq3xxs
+# AGENT: strata-dual-3080-qwen-flash
 
-Reproduce `launch_swift_iq3xxs.sh`. This file is for an agent, not a human. Paths below are the reference PC unless remapped.
+Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This file is for an agent, not a human. Paths below are the reference PC unless remapped.
+
+**IQ3_XXS** (`launch_swift_iq3xxs.sh`): full RAM arena, ~70–80 tok/s decode on this box. Quant fits 64 GB.
+
+**IQ4_XS** (`launch_swift_iq4xs.sh`): dual-GPU **VRAM first, then RAM**. Upstream Strata v0.1.38 does not merge this yet. Method, patch, and citations: **[RESIDENT_ON_SPLIT.md](RESIDENT_ON_SPLIT.md)** ([Niko1221/Strata#604](https://github.com/Niko1221/Strata/issues/604), [#364](https://github.com/Niko1221/Strata/issues/364), [#384](https://github.com/Niko1221/Strata/issues/384), [PR #639](https://github.com/Niko1221/Strata/pull/639), [PR #640](https://github.com/Niko1221/Strata/pull/640), [PR #731](https://github.com/Niko1221/Strata/pull/731)).
 
 ## Goal
 
-Bring up **Strata v0.1.31** serving **Swift 1.5 Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS** with **official Swift MTP packed q2_0**, adaptive MTP, GPU vision, dual RTX 3080 layer-split, OpenAI API on **0.0.0.0:8005**.
+Bring up **Strata v0.1.38** serving **Swift 1.5 Qwen3.8-Flash-Next**:
+
+- **IQ3_XXS** (GSQ-RCO): official Swift MTP packed q2_0, adaptive MTP, GPU vision, dual RTX 3080 layer-split, OpenAI API on **0.0.0.0:8005**.
+- **IQ4_XS** (bartowski): same engine after `patches/resident-on-split-v0.1.38.patch` — `--resident-experts` on the split (GPU caches, then RAM complement).
 
 Do **not** use ISTA IQ3_S, original-Qwen MTP (`mtp-qwen`), Unsloth BF16/Q8 MTP, or the GitHub **sm_120** prebuilt engine.
 
@@ -14,8 +21,8 @@ This repo is **launch/compile recipe only**. Engine source is pulled at setup ti
 
 | used | url | pin / note |
 | --- | --- | --- |
-| Strata engine (ONLY tree used) | https://github.com/Niko1221/Strata | tag **`v0.1.31`** = https://github.com/Niko1221/Strata/releases/tag/v0.1.31 |
-| clone in this bundle | `clone_strata.sh` | `gh-proxy.com/https://github.com/Niko1221/Strata/archive/refs/tags/v0.1.31.zip` |
+| Strata engine (ONLY tree used) | https://github.com/Niko1221/Strata | tag **`v0.1.38`** = https://github.com/Niko1221/Strata/releases/tag/v0.1.38 |
+| clone in this bundle | `clone_strata.sh` | `gh-proxy.com/https://github.com/Niko1221/Strata/archive/refs/tags/v0.1.38.zip` |
 | llama.cpp (via Strata setup.py) | https://github.com/ggml-org/llama.cpp | commit `3cf03257f219afbe7334045ff7c6a06ac68c627d` |
 | GGUF | https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF | IQ3_XXS two shards + mmproj |
 | MTP source | https://huggingface.co/ukisai/Swift-Qwen3.8-Flash-Next | BF16 `mtp.*`, then pack q2_0 |
@@ -23,7 +30,7 @@ This repo is **launch/compile recipe only**. Engine source is pulled at setup ti
 
 **There is no separate "Strata-3090" git project in this stack.** Public 3090 numbers and the "gaming PC" install path are the **same** [Niko1221/Strata](https://github.com/Niko1221/Strata) repo (Ampere 24GB is their headline card). RTX 3080 20GB and RTX 3090 24GB are both **sm_86**. Official Linux prebuilt `strata-linux-x64.zip` is **sm_120** (50-series); 30-series must compile locally (`compile_engine.sh`). Do not confuse with `ninfer-3090` / `iamwavecut/ninfer` — different engine, not used here.
 
-Local patches on top of v0.1.31 (do not upstream unless asked): `patches/apply_local.py` (`STRATA_SKIP_BUILD`, `sampling.force`).
+Local patches on top of v0.1.38 (do not upstream unless asked): `patches/apply_local.py` (`STRATA_SKIP_BUILD`, `sampling.force`, **dual-GPU `--resident-experts`**). See [RESIDENT_ON_SPLIT.md](RESIDENT_ON_SPLIT.md).
 
 ## Do not put in git
 
@@ -57,8 +64,8 @@ Physical GPU mapping used here: `--gpus 1,0` + `layer_split=26` means CUDA devic
 
 | what | path | bytes |
 | --- | --- | --- |
-| Strata tree | `~/src/Strata` | tag `v0.1.31` |
-| engine | `~/src/Strata/engine/strata` + `strata-vision` | local compile 0.1.31 archs `[86]` |
+| Strata tree | `~/src/Strata` | tag `v0.1.38` |
+| engine | `~/src/Strata/engine/strata` + `strata-vision` | local compile 0.1.38 archs `[86]` |
 | BUILD.json | `~/src/Strata/engine/BUILD.json` | see `example-BUILD.json` |
 | data dir | `~/src/Strata-data` (sibling of Strata, not inside it) | |
 | GGUF dir | `~/models/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/` | |
@@ -117,7 +124,7 @@ repetition_penalty=1.0
 force=true
 ```
 
-Stock Strata 0.1.31 **ignores** unknown key `force`. Apply `patches/apply_local.py` so `serve/server.py` honors it (`svc.sampling_force`). Without the patch, clients (Open WebUI, speedtest) overwrite temp/top_p.
+Stock Strata **ignores** unknown key `force`. Apply `patches/apply_local.py` so `serve/server.py` honors it (`svc.sampling_force`). Without the patch, clients (Open WebUI, speedtest) overwrite temp/top_p.
 
 Adaptive MTP knobs (written by `apply_adaptive_mtp.py` into json before start):
 
@@ -159,14 +166,15 @@ HF repos:
 
 - model: `ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF`
 - MTP source: `ukisai/Swift-Qwen3.8-Flash-Next` (mtp.* only)
-- Strata: `Niko1221/Strata` tag `v0.1.31`
+- Strata: `Niko1221/Strata` tag `v0.1.38`
+- IQ4 GGUF: `ukisai/Swift-1.5-Qwen3.8-Flash-Next-GGUF` (`IQ4_XS/` shards)
 - llama.cpp pin: `3cf03257f219afbe7334045ff7c6a06ac68c627d` (`LLAMA_CPP_COMMIT` in setup.py)
 
 ## Compile Strata (sm_86)
 
 ```bash
 export STRATA_ROOT=$HOME/src/Strata
-bash clone_strata.sh          # gh-proxy zip v0.1.31 → ~/src/Strata if missing
+bash clone_strata.sh          # gh-proxy zip v0.1.38 → ~/src/Strata if missing
 python3 patches/apply_local.py "$STRATA_ROOT"
 bash compile_engine.sh        # nvcc from sglang-0519 cu13, arch=86, llama.cpp pin, vision GPU
 ```
@@ -178,7 +186,7 @@ bash compile_engine.sh        # nvcc from sglang-0519 cu13, arch=86, llama.cpp p
 - llama.cpp zip via gh-proxy at pin above; `STRATA_GGML_DIR=$ROOT/third_party/llama.cpp`
 - targets: `strata` then `strata-vision` (`STRATA_VISION_CUDA=ON`)
 - copies `data/expert-profile.bin` and `data/draft_vocab.bin` from this bundle into `$STRATA_ROOT/data/`
-- writes `engine/BUILD.json` `source=local version=0.1.31 archs=[86] vision=gpu`
+- writes `engine/BUILD.json` `source=local version=0.1.38 archs=[86] vision=gpu`
 - **always** set `STRATA_SKIP_BUILD=1` for later `setup.py` so it does not fetch sm_120 prebuilt or rebuild for hash mismatch
 
 Do not `apt install cuda-toolkit` on this PC; use the pip nvcc path. Override with `NVCC=` / `CUDA_PIP=` if the venv moves.
@@ -236,12 +244,14 @@ Target on this box: as many MoE experts on GPU as VRAM allows (was 18/20; 800 Mi
 ## Order on a new clone of this folder
 
 1. `clone_strata.sh`
-2. `python3 patches/apply_local.py`
+2. `python3 patches/apply_local.py`   # SKIP_BUILD, sampling.force, dual-GPU resident-on-split
 3. `compile_engine.sh`
 4. `scripts/download_swift15_flash_gsq_iq3.sh` (or skip if sizes already match)
 5. `pack_official_mtp.sh`
 6. `setup_swift_iq3xxs.sh`
 7. `launch_swift_iq3xxs.sh`
+
+IQ4 (VRAM then RAM; [RESIDENT_ON_SPLIT.md](RESIDENT_ON_SPLIT.md)): after 1–3 and 5, `scripts/download_swift15_flash_iq4xs.sh` → `setup_swift_iq4xs.sh` → `launch_swift_iq4xs.sh`.
 
 Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this PC. Keep arch=86 for 3080. Dual-GPU split 26 / gpus=1,0 is this machine's layout (GPU1 first).
 
@@ -249,16 +259,21 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 
 | file | role |
 | --- | --- |
-| `launch_swift_iq3xxs.sh` | start server |
+| `launch_swift_iq3xxs.sh` | IQ3 start (RAM arena) |
+| `launch_swift_iq4xs.sh` | IQ4 start (`--resident-experts`, GPU then RAM) |
 | `setup_swift_iq3xxs.sh` | setup.py pack + first apply_adaptive_mtp |
-| `apply_adaptive_mtp.py` | upsert spec/kv/ctx/prefill/reserve + sampling.force |
+| `setup_swift_iq4xs.sh` | IQ4 pack (`iq_pack --compat-bf16`) + json |
+| `apply_adaptive_mtp.py` | upsert spec/kv/ctx/prefill/reserve + sampling.force; `--resident-experts` |
 | `compile_engine.sh` | sm_86 engine+vision |
-| `clone_strata.sh` | v0.1.31 via gh-proxy zip |
+| `clone_strata.sh` | v0.1.38 via gh-proxy zip |
 | `pack_official_mtp.sh` | Swift mtp.* → q2_0 → mtp/rt |
 | `mtp_aria2_fetch.py` | fetch mtp tensors (7897 or hf-mirror) |
-| `scripts/download_swift15_flash_gsq_iq3.sh` | GGUF+mmproj |
+| `scripts/download_swift15_flash_gsq_iq3.sh` | IQ3 GGUF+mmproj |
+| `scripts/download_swift15_flash_iq4xs.sh` | IQ4 GGUF shards |
 | `scripts/print_expert_counts.py` | parse last loaded chunk in log |
-| `patches/apply_local.py` | STRATA_SKIP_BUILD + sampling.force |
+| `patches/apply_local.py` | STRATA_SKIP_BUILD + sampling.force + resident-on-split |
+| `patches/resident-on-split-v0.1.38.patch` | dual-GPU GPU-then-RAM (see RESIDENT_ON_SPLIT.md) |
+| `RESIDENT_ON_SPLIT.md` | method + Strata issues/PRs |
 | `tokenizer/chat_template.jinja` | Swift pack template, default xhigh |
 | `data/expert-profile.bin` | required by engine `--expert-profile` |
 | `data/draft_vocab.bin` | copied onto mtp/rt |

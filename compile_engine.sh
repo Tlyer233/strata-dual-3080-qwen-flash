@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compile Strata 0.1.31 engine+vision for sm_86. Do NOT use the GitHub prebuilt (sm_120).
+# Compile Strata 0.1.38 engine+vision for sm_86. Do NOT use the GitHub prebuilt (sm_120).
 # This machine: pip CUDA 13.4 nvcc from sglang-0519, not system cuda-toolkit.
 set -euo pipefail
 ROOT="${STRATA_ROOT:-$HOME/src/Strata}"
@@ -86,7 +86,7 @@ eng = pathlib.Path(sys.argv[1])
 arch = int(sys.argv[2])
 stamp = {
     "source": "local",
-    "version": "0.1.31",
+    "version": "0.1.38",
     "archs": [arch],
     "vision": "gpu",
     "cuda_dirs": [],

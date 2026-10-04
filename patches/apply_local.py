@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Idempotent patches for Strata v0.1.31 so this bundle launches without a sm_120 rebuild
+"""Idempotent patches for Strata v0.1.38 so this bundle launches without a sm_120 rebuild
 and so json sampling.force actually overrides the client.
+
+Also applies patches/resident-on-split-v0.1.38.patch so dual-GPU --resident-experts
+fills VRAM first and copies only the complement into RAM (Niko1221/Strata#604).
 
 Usage: python3 patches/apply_local.py [$HOME/src/Strata]
 """
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import sys
 
 ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path.home() / "src" / "Strata")
@@ -61,13 +65,13 @@ def main() -> None:
         patch_file(
             server,
             "        defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps\n"
-            "        if defaults:                 # the request's own fields win (explicit 0 stays greedy)\n"
+            "        if defaults:                   # the request's own fields win (explicit 0 stays greedy)\n"
             "            req_values = {k: v for k, v in (sampling or {}).items() if v is not None}\n"
             "            sampling = {**defaults, **req_values}\n",
             "        defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps\n"
             "        if self.sampling_force and self.sampling_defaults:\n"
             "            sampling = {**(sampling or {}), **self.sampling_defaults}\n"
-            "        elif defaults:                 # the request's own fields win (explicit 0 stays greedy)\n"
+            "        elif defaults:                   # the request's own fields win (explicit 0 stays greedy)\n"
             "            req_values = {k: v for k, v in (sampling or {}).items() if v is not None}\n"
             "            sampling = {**defaults, **req_values}\n",
             "Service.run force merge",
@@ -111,8 +115,49 @@ def main() -> None:
             "    svc.sampling_force = sampling_force\n",
             "svc.sampling_force assign",
         )
+        t = server.read_text(encoding="utf-8")
 
+    if 'elif key == "force":' not in t:
+        patch_file(
+            server,
+            "            out[key] = value\n"
+            "        else:\n"
+            "            print(f\"[strata] config sampling.{key}={value!r}: unknown key, ignored\", flush=True)\n",
+            "            out[key] = value\n"
+            "        elif key == \"force\":\n"
+            "            if not isinstance(value, bool):\n"
+            "                raise SystemExit(f\"[strata] config sampling.force={value!r}: expected true or false\")\n"
+            "        else:\n"
+            "            print(f\"[strata] config sampling.{key}={value!r}: unknown key, ignored\", flush=True)\n",
+            "sampling.force known key",
+        )
+
+    apply_resident_on_split(ROOT)
     print("ok")
+
+
+def apply_resident_on_split(root: pathlib.Path) -> None:
+    """GPU caches first, RAM holds experts no card holds. See RESIDENT_ON_SPLIT.md."""
+    gen = root / "src" / "program" / "generate.cpp"
+    if not gen.is_file():
+        sys.exit(f"missing {gen}")
+    if "resident RAM mode with a layer split" in gen.read_text(encoding="utf-8"):
+        print("skip generate.cpp: resident-on-split")
+        return
+    patch = pathlib.Path(__file__).resolve().parent / "resident-on-split-v0.1.38.patch"
+    if not patch.is_file():
+        sys.exit(f"missing {patch}")
+    r = subprocess.run(
+        ["patch", "-p1", "--forward", "--batch", "-i", str(patch)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        sys.stderr.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        sys.exit(f"resident-on-split patch failed ({r.returncode})")
+    print("patched generate.cpp+setup.py: resident-on-split (GPU then RAM)")
 
 
 if __name__ == "__main__":
