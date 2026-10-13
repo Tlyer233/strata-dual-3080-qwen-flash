@@ -281,6 +281,8 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `example-run-swift-iq3_xxs.sh` | working run wrapper snapshot |
 | `example-BUILD.json` | working BUILD.json snapshot |
 | `03_downloads_mirrors.md` | aria2 7897 recipe |
+| `scripts/decode_ctx_tps.py` | bench：8k-256k 十类 sweep，写 results/*.json |
+| `scripts/decode_bench.py` | bench：单次测量（服务端 timings 优先） |
 
 Not this launch: `launch_ista_iq3s.sh`, `pack_qwen_mtp.sh`, ISTA GGUF, Unsloth GGUF.
 
@@ -338,3 +340,23 @@ adaptive MTP（spec 6 / mtp-max-t 4 / suffix-draft 3 / min_p 0.5），conversati
   官方原话"流少时或 prompts 稀疏时可能更快"——本机 2 流 **待 A/B 实测**。
 - 未修风险（至 v0.1.43.1）：#1503 slot+停放可能串上下文（抽查各会话 marker）；#1603 双长上下文会话并发可能挂死
   （判据：日志 `running:0 queued:0` 且两分钟不动）；0.1.43.1 修的是 #1994（slot 400 "no such free slot" → 503 retry）。
+
+## Benchmark 脚本（产出上面那张表）
+
+`scripts/decode_ctx_tps.py`（sweep 8k→256k，10 类 scenario）+ `scripts/decode_bench.py`（单次测量：
+读服务端 `timings` 的 `prompt_per_second`/`predicted_per_second`/`cache_n`，TTFT 与 decode 分开计，纯 stdlib）。
+跑法：`python3 scripts/decode_ctx_tps.py`（会问结果名，JSON 写到 `~/ubuntu_handoff/results/<名>.json`，就是表旁那两个文件）。
+8k 档 pre 1608 → 256k 档 2928 的差别是短 prompt 吃不满 `PREFILL=8192` 大窗，档位越高越吃满。
+
+## Model / PLE / MTP assets（v0.1.43.1 实测这套；二进制不进 git，按 03_downloads_mirrors.md 的 aria2/7897 下法）
+
+| 资产 | HuggingFace repo | 本地路径（参考机） | 大小 |
+| --- | --- | --- | --- |
+| 主模型 IQ3_S（abliterated）2 分片 + mmproj BF16 + SHA256SUMS | `slider-meister-pub/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S-GGUF` | `~/models/slider-meister-pub/Swift-1.5-…-IQ3_S-GGUF/` | 79 G |
+| **PLE（n-gram 表，外挂）** Q8_0 分片 | `sleepyeldrazi/Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-GGUF` | `~/models/sleepyeldrazi/…-Q8_0-PLE-GGUF/`（本机现存 `-00002-of-00002.gguf`） | 51 G |
+| MTP（官方 Swift mtp.* → q2_0 packed） | 源 `ukisai/Swift-Qwen3.8-Flash-Next`，用本仓 `pack_official_mtp.sh` 打包 | `~/src/Strata-data/mtp/rt/` | 0.79 G |
+| Strata pack（iq_pack `--compat-bf16` 产物：dense.bin/conversions/index/native_experts） | 由 setup 生成，非下载 | `~/src/Strata-data/packs/swift-abliterated-iq3_s/` | 1.5 G |
+
+- `--native` = IQ3_S 主分片（split=26 靠它），`--ple-gguf` = sleepyeldrazi Q8_0 PLE（**必打 #1233 补丁**，见上）。
+- 下载：`https://huggingface.co/<repo>/resolve/main/<file>`，有梯子 `https_proxy=http://127.0.0.1:7897` + aria2c `-c`；
+  无梯子换 `https://hf-mirror.com/<repo>/resolve/main/<file>`。校验 SHA256SUMS（IQ3_S 仓自带）。
