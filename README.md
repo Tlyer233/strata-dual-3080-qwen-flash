@@ -360,3 +360,19 @@ adaptive MTP（spec 6 / mtp-max-t 4 / suffix-draft 3 / min_p 0.5），conversati
 - `--native` = IQ3_S 主分片（split=26 靠它），`--ple-gguf` = sleepyeldrazi Q8_0 PLE（**必打 #1233 补丁**，见上）。
 - 下载：`https://huggingface.co/<repo>/resolve/main/<file>`，有梯子 `https_proxy=http://127.0.0.1:7897` + aria2c `-c`；
   无梯子换 `https://hf-mirror.com/<repo>/resolve/main/<file>`。校验 SHA256SUMS（IQ3_S 仓自带）。
+
+## Parallel-2 slot 实测（strata **v0.1.43.1** + `--batch-mtp` draft 模式，2026-10-13 21:08 boot，A 局）
+
+启动：`systemctl --user set-environment PARALLEL=2 BATCH_MODE=draft && systemctl --user restart strata-swift`
+（unit env 是杠杆——launcher 只认 env；boot 日志出现 `--pipeline-windows 2 is off: not with --batch slots` = slot 生效）。
+测试：每请求 300 tok 流式，读服务端 timings。
+
+| 场景 | t/s | draft 接受 | 说明 |
+| --- | --- | --- | --- |
+| 单打（另一 slot 空闲） | **33.5 / 39.5** | solo2 170/181=94% | draft→verify 串行窗，比纯单流（101-152）慢 |
+| 两路同时打 | **47.2 + 54.0（合计 ~101）** | 0/0（窗互扣） | 两 slot 的 draft/verify 窗互相填缝 |
+
+- 结论：draft slot 下单打最慢；两路都在时总吞吐≈纯单流。**两路同时打体验=单流水平（每路 ~50），代价是单打 150→35**。
+- 对照 0.1.43.0（无 draft slot）：两路各仅 9-11 t/s；draft 模式把双路并发提了 ~5×。
+- B 局 `BATCH_MODE=pipe`（43.1 默认 pipelined 组，无 slot draft）待测。
+- 回单流：`systemctl --user unset-environment PARALLEL BATCH_MODE && systemctl --user restart strata-swift`。
