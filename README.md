@@ -376,3 +376,16 @@ adaptive MTP（spec 6 / mtp-max-t 4 / suffix-draft 3 / min_p 0.5），conversati
 - 对照 0.1.43.0（无 draft slot）：两路各仅 9-11 t/s；draft 模式把双路并发提了 ~5×。
 - B 局 `BATCH_MODE=pipe`（43.1 默认 pipelined 组，无 slot draft）待测。
 - 回单流：`systemctl --user unset-environment PARALLEL BATCH_MODE && systemctl --user restart strata-swift`。
+
+## B 局 pipe（pipelined groups）实测 + A/B 定案（strata **v0.1.43.1**，2026-10-13 21:43，同一 300-tok 脚本）
+
+| mode | 单打 t/s | 两路同时打 t/s | draft |
+| --- | --- | --- | --- |
+| A `draft`（--batch-mtp 串行窗） | 33.5 / 39.5 | **47.2 + 54.0（合计 ~101）** | 串行窗内 94% 接受 |
+| B `pipe`（默认 pipelined 组） | 48.4 / 71.1 | 43.4 + 38.3（合计 ~82） | 两路时 0/0（pipelined 组不跑 slot draft） |
+| 参考：纯单流（parallel 关） | **101.8 / 152.8** | — | 95% |
+
+- **定案：2 流用 A `draft`**（并发 101 > 82）——官方"流少/prompts 稀疏时串行 MTP 窗更快"在双 3080 复现；
+  官方 +25-30% 的 pipelined 优势是 4 流场景。`multi.sh` 默认保持 draft。
+- 两种 slot 模式单打都远慢于纯单流（150 → 33-71）：**没人在打字时才用单流**；回单流一条命令（见上节）。
+- 0.1.43.0 时代 9-11 t/s/路 → 43.1 的 38-54 t/s/路：slot 并发从"不可用"到"能用"。
