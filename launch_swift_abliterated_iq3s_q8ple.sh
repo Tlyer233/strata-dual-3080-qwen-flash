@@ -150,14 +150,17 @@ CCPY
 echo "conversation cache: 预算 ${CONV_CACHE_MIB} MiB / 槽 ${CONV_CACHE_SLOTS} / RAM 地板 ${CONV_CACHE_MIN_FREE_MIB} MiB / 短请求门槛 ${CONV_CACHE_MIN_TOKENS} tok / 检查点池 ${PROMPT_CACHE_N} x every ${PROMPT_CACHE_EVERY} tok  (CONV_CACHE_MIB=0 关掉停放)" >&2
 
 # --- 并发流: 默认单流, 开机(systemd 读 json)/手动启动都先把 parallel 清掉 ---
-# 实测双 3080: 每 slot 吃 ~1.55 GiB 显存/stage(专家热层 -22%) + ~11.6 GiB pinned RAM,
-# slot 无 MTP draft -> 并发 decode 仅 9-11 tok/s/路, 单流也被压到 66-74 (纯单流 93).
-# 多流走同名 multi 脚本 (launch_swift_abliterated_iq3s_q8ple_multi.sh), 它 export PARALLEL=N>1.
-# 双卡 parallel 必须 --batch-groups 1: auto = 2 groups of 1 slot 走流水慢路径 (issue #1906).
+# 实测双 3080 (0.1.43.0): 每 slot 吃 ~1.55 GiB 显存/stage(专家热层 -22%) + ~11.6 GiB pinned RAM,
+# slot 无 MTP draft 时并发 decode 仅 9-11 tok/s/路, 单流也被压到 66-74 (纯单流 93).
+# 多流走同名 multi 脚本, 它 export PARALLEL=N>1 + BATCH_MODE:
+#   draft (默认, 流少合适): --batch-groups 1 + --batch-mtp -> slot 有 MTP draft (串行窗). #2038 在 0.1.43.1 已修.
+#   pipe: 默认 pipelined 组 (slot 无 draft), 官方 4 流/2 GPU +25-30%; 流多时用.
+# (0.1.43.0 教训 auto=2 groups×1slot 走流水慢路径 #1906 — 43.1 已修 pipelined 组, 待本机 A/B.)
 PARALLEL="${PARALLEL:-1}"
-"$CCPY_BIN" - "$CFG" "$PARALLEL" <<'PYP'
+BATCH_MODE="${BATCH_MODE:-draft}"
+"$CCPY_BIN" - "$CFG" "$PARALLEL" "$BATCH_MODE" <<'PYP'
 import json, sys
-path, par = sys.argv[1], int(sys.argv[2] or 1)
+path, par, mode = sys.argv[1], int(sys.argv[2] or 1), (sys.argv[3] or "draft").lower()
 with open(path, encoding="utf-8") as f:
     cfg = json.load(f)
 args = list(cfg.get("args") or [])
@@ -171,8 +174,10 @@ while i < len(args):
     out.append(args[i])
     i += 1
 if par > 1:
-    out = out + ["--batch-groups", "1"]
     cfg["parallel"] = par
+    if mode == "draft":
+        out = out + ["--batch-groups", "1", "--batch-mtp"]
+    # pipe: 43.1 默认就是 pipelined 组, 不加参数
 else:
     cfg.pop("parallel", None)
 cfg["args"] = out
@@ -180,7 +185,10 @@ after = json.dumps(cfg, ensure_ascii=False, indent=1) + "\n"
 if open(path, encoding="utf-8").read() != after:
     with open(path, "w", encoding="utf-8") as f:
         f.write(after)
-print("parallel: " + (f"= {par} 流 (--batch-groups 1 已写入)" if par > 1 else "单流 (parallel/--batch-groups 已清除)"), flush=True)
+if par > 1:
+    print(f"parallel: = {par} 流 mode={mode} " + ("(--batch-groups 1 + --batch-mtp, slot 有 draft)" if mode == "draft" else "(默认 pipelined 组, slot 无 draft)"), flush=True)
+else:
+    print("parallel: 单流 (parallel/--batch-groups/--batch-mtp 已清除)", flush=True)
 PYP
 
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
