@@ -1,0 +1,18 @@
+# /home/xi/.config/systemd/user/strata-swift.service
+[Unit]
+Description=Strata Swift abliterated IQ3_S + Q8_0 PLE (port 8005, dual-GPU, ctx 268288)
+After=default.target
+# 永不放弃重试（开机没起来是事故，宁可一直重试）
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=PORT=8005
+ExecStart=/bin/bash %h/ubuntu_handoff/strata/launch_swift_abliterated_iq3s_q8ple.sh
+Restart=always
+RestartSec=15
+KillMode=control-group
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

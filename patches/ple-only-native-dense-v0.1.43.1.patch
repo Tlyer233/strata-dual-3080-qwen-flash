@@ -1,0 +1,15 @@
+--- /tmp/vanilla431/generate.cpp	2026-10-12 22:00:57.000000000 +0800
++++ /home/xi/src/Strata-0.1.43.1/src/program/generate.cpp	2026-10-13 19:51:24.358514049 +0800
+@@ -2551,6 +2551,12 @@
+             try {
+                 strata::GgufFile pg(o.ple_gguf);
+                 if (const strata::MetaValue* v = pg.get("general.architecture")) ple_only = v->s == "strata-ple";
++                // 本地补丁 (issue #1233, v0.1.43.1 未修): 外挂 PLE-only 表（单张量 per_layer_token_embd.weight,
++                // sleepyeldrazi Q8_0 之类）不是完整 gguf 分片, 其 split.no 与 Swift shard 2 (layers 13-47)
++                // 撞号 → native dense 拒载 "duplicate split shard number". PLE 路径自己读它, 不加入.
++                if (!ple_only && pg.tensors().size() == 1 &&
++                    pg.tensors()[0].name == "per_layer_token_embd.weight")
++                    ple_only = true;
+             } catch (const std::exception&) {}
+             if (!ple_only &&
+                 std::find(o.native_dense_gguf.begin(), o.native_dense_gguf.end(), o.ple_gguf) == o.native_dense_gguf.end())

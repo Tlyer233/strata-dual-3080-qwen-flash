@@ -283,3 +283,58 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `03_downloads_mirrors.md` | aria2 7897 recipe |
 
 Not this launch: `launch_ista_iq3s.sh`, `pack_qwen_mtp.sh`, ISTA GGUF, Unsloth GGUF.
+
+## v0.1.43.1 — Swift 1.5 abliterated IQ3_S + sleepyeldrazi Q8_0 PLE（当前配置，2026-10-13）
+
+引擎 **strata v0.1.43.1**（本机源码编译 sm_86，pip CUDA 13 nvcc），**单流**（parallel 关），`--serve` :8005，
+ctx **268288**，kv `k8v4`，**prefill 8192**（launcher 里 `PREFILL=8192`，prefill 最大提速杠杆），
+双 3080 layer-split gpus=1,0 split=26，`--pipeline-windows 2`，`--resident-experts`（GPU 先、RAM 补 24.63 GiB pinned），
+adaptive MTP（spec 6 / mtp-max-t 4 / suffix-draft 3 / min_p 0.5），conversation-cache 停放默认
+（预算 19456 MiB / 槽 6 / RAM 地板 4096 MiB / 短请求门槛 4096 tok / 检查点 28×every 131072 tok）。
+
+- **必打本地补丁**（上游 [Niko1221/Strata#1233](https://github.com/Niko1221/Strata/issues/1233)，**v0.1.43.1 未修**）：
+  `patches/ple-only-native-dense-v0.1.43.1.patch` — 外挂单张量 PLE-only 表（`per_layer_token_embd.weight`）不加入
+  native dense；否则启动即 `native dense: duplicate split shard number` 崩溃循环（PLE 的 split.no 与 Swift shard 2 撞号）。
+  编译前 `git apply`/`patch -p1` 到 generate.cpp。
+- 默认开机 = systemd user unit `systemd/strata-swift.service` → `launch_swift_abliterated_iq3s_q8ple.sh`
+  （launcher **每次启动强制清 json 里的 parallel/--batch-groups/--batch = 开机订死单流**；停放参数走 env
+  `CONV_CACHE_MIB` 等，`systemctl --user set-environment` 覆盖，json 不是杠杆）。
+- 多流（multi-slot）另开：`launch_swift_abliterated_iq3s_q8ple_multi.sh`（默认 PARALLEL=2；`JSON_ONLY=1` 只写 json 不启动）。
+- json 快照：`example-strata-swift-abliterated-iq3_s-q8ple.json`。
+
+## Benchmark（strata **v0.1.43.1** + PLE 补丁，PREFILL=8192，单流；bench 2026-10-13 20:23，原始数据 `results/43_1_patch_1.json`）
+
+```
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    90.3    97.1    74.9    83.2   103.6    93.3    96.1    90.6    94.5    96.2    92.0  |       4.9     0.08      1608
+   32k    76.4    89.8    72.3    80.4    89.8    82.9    95.0   100.5    87.8    75.7    85.1  |      12.3     0.21      2548
+   64k    81.3    80.4    80.0    75.7    88.3    91.8    97.8    97.3    77.1    80.5    85.0  |      22.2     0.37      2831
+  128k    81.5    84.6    77.8    83.4    91.2    85.0    97.2    89.2    79.2    84.6    85.4  |      42.1     0.70      2977
+  200k    77.1    82.9    66.0    78.5    87.6    80.7    87.9    86.5    86.8    75.7    81.0  |      66.4     1.11      2950
+  256k    73.8    77.3    79.7    78.7    83.5    84.5    87.5    87.4    81.4    83.9    81.8  |      85.6     1.43      2928
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    80.1    85.4    75.1    80.0    90.7    86.4    93.6    91.9    84.5    82.8    85.0
+```
+
+- decode 全档位真实文本 **AVG 85.0 t/s**（10 类测试各有，才测得出专家交换的负载；单流）。
+- prefill：`PREFILL=8192` 后 64K+ **2831-2977 t/s ≈ RTX 4090 单卡（~3000）**；8K 档 1608（短 prompt 吃不满 8192 窗）。
+- 版本对照（同一微基准，短 ctx）：decode 0.1.42 **93** → 0.1.43 **95.2** → **0.1.43.1 101.8/152.8 t/s**（draft 接受率 ~93% 不变，纯窗口速度）；
+  prefill 25K 冷 ~1750（0.1.42，PREFILL=4096）→ 2062（0.1.43.1，PREFILL=4096）→ **2928-2977（0.1.43.1 + PREFILL=8192）**。
+- 43.1 的 decode 增益来自**默认开启**的 `R4 hit path ON`（resident experts computed on GPU）+ `token graph hit path`（设备端决策）；
+  release notes 的 "RTX 30 decode +5-11%" 是 Q2_0-pack 的 Q3_K kernel，**IQ3_S 不吃**；`STRATA_ADAPT_OVERLAP` 对本机无效
+  （boot 日志：`is off: not on a layer split`）。
+- 对照组：`results/iq3_4096_1024reserve.json`（2026-10-12 15:12，v0.1.43 + PREFILL=4096 / VRAM_RESERVE=1024）。
+
+## 多 slot ≠ 并发（multi-slot 须知）
+
+- **停放槽（conversation-cache slots）≠ 并发**：槽 6 = 6 条长对话的 KV 常驻 RAM 停放（240-256K 每条约 3.5-4.6 GiB），
+  回访串行取用。本机实测 256K 回访 **4.9 / 5.9 s**（prompt 全量命中缓存）；4090 5×240K 回访 0.7-2.1 s。
+- **真并发** = json `parallel: N`（serve 翻译成 `--batch N`，每 slot 一个独立会话，含各自 GDN/QSA-KV/indexer/PLE 历史）。
+  0.1.43.0 时代实测（parallel 2，双 3080）：两路**同时打字**各仅 **9-11 t/s**（batch slot 无 MTP draft，每窗 1 token）；
+  被 slot 占用时单请求 66-74（纯单流 93）；每 slot 吃 ~1.55 GiB 显存/stage（专家热层 -22%）+ ~11.6 GiB pinned RAM。
+- v0.1.43.1 新行为（[#2038](https://github.com/Niko1221/Strata/issues/2038) 已修）：layer-split `--batch` 默认 pipelined 组
+  （官方 4 流/2 GPU +25-30%，无 slot draft）；`--batch-mtp` + `--batch-groups 1` = slot 恢复 MTP draft（串行窗），
+  官方原话"流少时或 prompts 稀疏时可能更快"——本机 2 流 **待 A/B 实测**。
+- 未修风险（至 v0.1.43.1）：#1503 slot+停放可能串上下文（抽查各会话 marker）；#1603 双长上下文会话并发可能挂死
+  （判据：日志 `running:0 queued:0` 且两分钟不动）；0.1.43.1 修的是 #1994（slot 400 "no such free slot" → 503 retry）。
