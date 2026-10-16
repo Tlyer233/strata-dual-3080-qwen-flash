@@ -1,0 +1,77 @@
+{
+ "when": "2026-10-16T12:57:27",
+ "url": "http://127.0.0.1:8005",
+ "engine": null,
+ "target_tokens": 496000,
+ "prompt_tokens": 472481,
+ "cache_n": 0,
+ "predicted_n": 173,
+ "decode_tps": 75.7,
+ "draft_n": 159,
+ "draft_n_accepted": 115,
+ "http_wall_s": 230.5343868289783,
+ "wall_s": 230.53439618999255,
+ "answer": "ALPHA=VTK6-5601; BRAVO=9N5Y-2966; CHARLIE=76KY-4075; DELTA=H7TS-3427; ECHO=TDF6-5087",
+ "needles": [
+  [
+   "ALPHA",
+   "VTK6-5601"
+  ],
+  [
+   "BRAVO",
+   "9N5Y-2966"
+  ],
+  [
+   "CHARLIE",
+   "76KY-4075"
+  ],
+  [
+   "DELTA",
+   "H7TS-3427"
+  ],
+  [
+   "ECHO",
+   "TDF6-5087"
+  ]
+ ],
+ "depths": [
+  0.1,
+  0.3,
+  0.5,
+  0.7,
+  0.9
+ ],
+ "scores": {
+  "ALPHA": {
+   "want": "VTK6-5601",
+   "got": "VTK6-5601",
+   "ok": true,
+   "loose": true
+  },
+  "BRAVO": {
+   "want": "9N5Y-2966",
+   "got": "9N5Y-2966",
+   "ok": true,
+   "loose": true
+  },
+  "CHARLIE": {
+   "want": "76KY-4075",
+   "got": "76KY-4075",
+   "ok": true,
+   "loose": true
+  },
+  "DELTA": {
+   "want": "H7TS-3427",
+   "got": "H7TS-3427",
+   "ok": true,
+   "loose": true
+  },
+  "ECHO": {
+   "want": "TDF6-5087",
+   "got": "TDF6-5087",
+   "ok": true,
+   "loose": true
+  }
+ },
+ "passed": "5/5"
+}

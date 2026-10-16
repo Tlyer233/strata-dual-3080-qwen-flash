@@ -1,0 +1,77 @@
+{
+ "when": "2026-10-16T13:01:56",
+ "url": "http://127.0.0.1:8005",
+ "engine": null,
+ "target_tokens": 518000,
+ "prompt_tokens": 493734,
+ "cache_n": 0,
+ "predicted_n": 173,
+ "decode_tps": 63.0,
+ "draft_n": 167,
+ "draft_n_accepted": 110,
+ "http_wall_s": 247.1249694309954,
+ "wall_s": 247.1249855819915,
+ "answer": "ALPHA=CFBU-1981; BRAVO=2S6T-8747; CHARLIE=HKCE-6908; DELTA=KZQ8-2208; ECHO=88UE-0921",
+ "needles": [
+  [
+   "ALPHA",
+   "CFBU-1981"
+  ],
+  [
+   "BRAVO",
+   "2S6T-8747"
+  ],
+  [
+   "CHARLIE",
+   "HKCE-6908"
+  ],
+  [
+   "DELTA",
+   "KZQ8-2208"
+  ],
+  [
+   "ECHO",
+   "88UE-0921"
+  ]
+ ],
+ "depths": [
+  0.1,
+  0.3,
+  0.5,
+  0.7,
+  0.9
+ ],
+ "scores": {
+  "ALPHA": {
+   "want": "CFBU-1981",
+   "got": "CFBU-1981",
+   "ok": true,
+   "loose": true
+  },
+  "BRAVO": {
+   "want": "2S6T-8747",
+   "got": "2S6T-8747",
+   "ok": true,
+   "loose": true
+  },
+  "CHARLIE": {
+   "want": "HKCE-6908",
+   "got": "HKCE-6908",
+   "ok": true,
+   "loose": true
+  },
+  "DELTA": {
+   "want": "KZQ8-2208",
+   "got": "KZQ8-2208",
+   "ok": true,
+   "loose": true
+  },
+  "ECHO": {
+   "want": "88UE-0921",
+   "got": "88UE-0921",
+   "ok": true,
+   "loose": true
+  }
+ },
+ "passed": "5/5"
+}
