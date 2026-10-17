@@ -19,7 +19,7 @@ Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This fi
 * **补丁（必打）**：`patches/ple-only-native-dense-v0.1.43.1.patch` — 上游 #1233 未修：外挂 PLE-only 单张量表撞 Swift shard 2 的 split.no，
   不打则启动即 `native dense: duplicate split shard number` 崩溃循环。44.1 树原样可打。
 * **script**：
-  - `launch_swift_abliterated_iq3s_q8ple_512k.sh` = **当前在用 512K**：ctx 524288 + `--rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144 免传）+ 停放槽 3 + 检查点池 14（512K 满长会话 pinned KV ≈ 4.8 G/条，19456 MiB 预算只够 ~4 条）。
+  - `launch_swift_abliterated_iq3s_q8ple_512k.sh` = **当前在用 512K**：ctx 524288 + `--rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144 免传）+ 停放槽 3 + 检查点池 14（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
   - `launch_swift_abliterated_iq3s_q8ple.sh` = 256K 版（ctx 268288，无 rope flag，槽 6 池 28）。三 launcher 共用 `~/src/Strata/strata-swift-…-q8ple.json`，**谁最后启动谁赢**。
   - `launch_swift_abliterated_iq3s_q8ple_multi.sh` = 双路（PARALLEL=2，BATCH_MODE=draft|pipe，定案见下文 A/B）。
   - `systemd/strata-swift.service`：开机默认单元（ExecStart 现仍指 256K 脚本；**unit env 才是 PARALLEL/CONV_* 杠杆**，json 不是）。
@@ -87,7 +87,7 @@ prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5
 - 512K 冷 prefill：500,183 tok **236.6 s（3.94 分钟）** @2114 t/s。该深度 decode 63-86 t/s（针测实测 63-76）。
 - **512K 配置**（`launch_swift_abliterated_iq3s_q8ple_512k.sh`，快照 `example-strata-swift-abliterated-iq3_s-q8ple.json`）：
   `--max-context 524288 --rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144，免传）；
-  停放槽 6→**3**、检查点池 28→**14**（512K 满长会话 pinned KV ≈ 4.8 G/条，19456 MiB 预算只够 ~4 条）。
+  停放槽 6→**3**、检查点池 28→**14**（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
 - **为什么带 YaRN**：上游 `docs/DETAILS.md` 同款 IQ3_S 实测 293K 处 yarn2 NLL 2.04 vs 裸 2.22（3-4× 噪声），≤32K 无退化，421K yarn2 长文 QA 8/8；
   上游 [PR #1692](https://www.stratat.com/en/pulls/1692)：普通 RoPE 512K 埋点 3/3、普通 RoPE 1M 0/3、YaRN×4 1M 3/3。
   引擎口径：rope 缩放整进程固定（缓存 K 是 post-RoPE），无按请求切换；>262K 官方就是要 yarn。
