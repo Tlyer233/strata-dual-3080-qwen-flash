@@ -23,7 +23,7 @@ Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This fi
   - `launch_swift_abliterated_iq3s_q8ple.sh` = 256K 版（ctx 268288，无 rope flag，槽 6 池 28）。三 launcher 共用 `~/src/Strata/strata-swift-…-q8ple.json`，**谁最后启动谁赢**。
   - `launch_swift_abliterated_iq3s_q8ple_multi.sh` = 双路（PARALLEL=2，BATCH_MODE=draft|pipe，定案见下文 A/B）。
   - `systemd/strata-swift.service`：开机默认单元（ExecStart 现仍指 256K 脚本；**unit env 才是 PARALLEL/CONV_* 杠杆**，json 不是）。
-    2026-10-16 状态：单元 stopped，512K 由脚本在终端手工拉起——开机进 512K 需先给单元加 drop-in 换 ExecStart。
+    2026-10-16 状态：**已加 drop-in**（`~/.config/systemd/user/strata-swift.service.d/override.conf`，ExecStart→512K 启动器），下次开机自启即 512K；回 256K = 删 drop-in。
   - `JSON_ONLY=1 bash <launcher>`：只写 json 不启动、不 pkill（干跑验证用）。
   - YaRN 坑：缩放整进程固定（缓存 K 是 post-RoPE，"one run one scaling"），切 rope 模式必须重启；>262144 官方口径必须 yarn
     （上游 DETAILS.md 同款 IQ3_S：293K NLL yarn2 2.04 vs 裸 2.22 = 3-4× 噪声，≤32K 无退化，421K yarn2 QA 8/8；1M 才需要 yarn4）。
