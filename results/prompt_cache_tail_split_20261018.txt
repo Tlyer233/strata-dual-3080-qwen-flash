@@ -1,0 +1,18 @@
+dual RTX 3080 20G x2  layer-split=26  PREFILL=8192  --prompt-cache 14 --prompt-cache-every 131072
+--prompt-cache-tail ON (local patch patches/prompt-cache-tail-layer-split.patch)
+engine log: session is up (engine 0.1.44.1)  2026-10-18 08:57
+port 8005  model swift-1.5-abliterated-iq3_s-q8ple  enable_thinking=false  max_tokens=8
+
+sibling fork = same 22,141-token prefix, only the last user line changes
+(Codex 插话: drop in-flight assistant tail, re-send history + new sentence)
+
+  run                      prompt  reused     read  wall_s  note
+--------------------------------------------------------------------------------
+  A  cold fill              22141       0    22141    11.5  log: tail ckpt @ 16384 (2*8192)
+  B  tail fork              22141   16384     5757     5.0  last line changed; 74% prefix hit
+  B  without patch (infer)  22141       0    22141   ~11.5  prompt < every 131072, no mid ckpt
+
+engine lines:
+  strata serve: prompt-cache-tail checkpoint at 16384 tokens (layer split)
+  prompt 22141 tokens = 0 reused + 22141 read in 11369 ms (1947.4 tok/s)
+  prompt 22141 tokens = 16384 reused + 5757 read in 4889 ms (1177.4 tok/s)

@@ -9,8 +9,8 @@ set -euo pipefail
 ROOT="${STRATA_ROOT:-$HOME/src/Strata}"
 PORT="${PORT:-8005}"
 CTX="${CTX:-524288}"
-PREFILL="${PREFILL:-4096}"
-VRAM_RESERVE="${VRAM_RESERVE:-700}"
+PREFILL="${PREFILL:-8192}"
+VRAM_RESERVE="${VRAM_RESERVE:-1024}"
 SPEC_MIN_P="${SPEC_MIN_P:-0.5}"
 KV="${KV:-k8v4}"
 GPUS="${GPUS:-1,0}"
@@ -91,6 +91,31 @@ fi
 #     every 131072      -> 2-3 个/会话, 5 个占用者要 ~15 个, 池 28 有足够余量  <- 现在
 #   日志里 "N checkpoints" 是写次数不是复用, 所以计数器看着健康.
 #   every 131072 的代价: 回退/分支最多重读 128K token (~55 s); 线性 agent 轮次不受影响.
+#
+# --- 旗杆(检查点) vs 停放(slot), 别混 ---
+# 停放 --conversation-cache-slots: 整段会话 KV 拷到内存, 换会话用. 本机 3 槽.
+# 旗杆 --prompt-cache: 同一段对话路上的存档, 分叉时退到最近一根再走.
+#   官方口径 (~118 MB 宿主 RAM / 根, 不占显存). KV 仍只在 GPU 里留当前那一局.
+#   本机 14 根 ≈ 1.6 GiB RAM. 多插几根 = 加大 PROMPT_CACHE_N, 只吃内存.
+#   多插几根不会缩短 128K 间隔 (间隔是 EVERY); 只避免 3 段长会话把彼此的旗杆挤掉.
+#   把 EVERY 改密 (8K/16K) 才能让分叉少走, 但 3 段 512K 会抢光池, 换会话又变慢.
+#
+# --- Codex 插话整段 prefill (2026-10-18) ---
+# Codex 插话 = 掐断当前请求, 丢掉助手半截, 把新句子接在上一句完整话后面重发.
+# 这是尾部分叉, 不是追加. live/停放对不上, 只能退到最近旗杆, 最坏走满 128K (~1 min).
+# 别的 agent 只在末尾追加, 前缀命中, 所以只有 Codex 炸.
+#
+# --- --prompt-cache-tail: 尾巴再插一根旗杆 (Codex 插话 / 尾部分叉) ---
+# 人话: 每次快读完时, 在尾巴再插一根旗杆. 插话通常拐在尾巴, 下一轮只重读最后
+#   几千 token (一个 --prefill chunk, 本机 8192), 不是 128K.
+# 官方 generate.cpp 写死 !multi_gpu (0.1.45 仍是). 本机 2026-10-18 补丁: 去掉该限制,
+#   双卡各 stage 在尾巴 chunk 也存 part, checkpoint_at(..., as_tail).
+#   备份: ubuntu_handoff/strata/bak-prompt-cache-tail-20261018/
+# 本机实测 2026-10-18 3080×2 split=26, prompt 22141 < every 131072:
+#   A 0 reused + 22141 / 11.4 s; 尾巴旗杆打在 16384 (2*8192);
+#   B 同前缀换最后一句: 16384 reused + 5757 / 4.9 s. 无补丁时 B 会 0 reused 再走 11 s.
+# 4090 单卡官方就能开, 不需要这份补丁.
+# PROMPT_CACHE_TAIL=0 关掉写入. 池满时最先丢掉这根尾巴旗杆. 多占约 118 MB RAM, 0 显存.
 # --conversation-cache-min-tokens 4096 (官方 PR #1597): 短请求不再占停放槽把长会话顶掉
 #   (那条实测: 3 条几百 token 的短请求顶掉 19198 token 长会话 -> 41.4 s 重读; 设门槛后 0.3 s, 304x).
 CONV_CACHE_MIB="${CONV_CACHE_MIB:-19456}"
@@ -99,6 +124,7 @@ CONV_CACHE_MIN_FREE_MIB="${CONV_CACHE_MIN_FREE_MIB:-4096}"
 CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-4096}"
 PROMPT_CACHE_N="${PROMPT_CACHE_N:-14}"
 PROMPT_CACHE_EVERY="${PROMPT_CACHE_EVERY:-131072}"
+PROMPT_CACHE_TAIL="${PROMPT_CACHE_TAIL:-1}"
 CCPY_BIN="$ROOT/.venv/bin/python"
 [ -x "$CCPY_BIN" ] || CCPY_BIN="$(command -v python3)"
 "$CCPY_BIN" - "$CFG" \
@@ -153,7 +179,23 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 print("conversation cache: 已写入 " + "  ".join(f"{f} {v}" for f, v in want.items()))
 CCPY
-echo "conversation cache: 预算 ${CONV_CACHE_MIB} MiB / 槽 ${CONV_CACHE_SLOTS} / RAM 地板 ${CONV_CACHE_MIN_FREE_MIB} MiB / 短请求门槛 ${CONV_CACHE_MIN_TOKENS} tok / 检查点池 ${PROMPT_CACHE_N} x every ${PROMPT_CACHE_EVERY} tok  (CONV_CACHE_MIB=0 关掉停放)" >&2
+echo "conversation cache: 预算 ${CONV_CACHE_MIB} MiB / 槽 ${CONV_CACHE_SLOTS} / RAM 地板 ${CONV_CACHE_MIN_FREE_MIB} MiB / 短请求门槛 ${CONV_CACHE_MIN_TOKENS} tok / 检查点池 ${PROMPT_CACHE_N} x every ${PROMPT_CACHE_EVERY} tok  tail=${PROMPT_CACHE_TAIL}  (CONV_CACHE_MIB=0 关掉停放)" >&2
+"$CCPY_BIN" - "$CFG" "$PROMPT_CACHE_TAIL" <<'PYTAIL'
+import json, sys
+path, on = sys.argv[1], sys.argv[2] not in ("0", "false", "no", "")
+flag = "--prompt-cache-tail"
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)
+args = [a for a in (cfg.get("args") or []) if a != flag]
+if on:
+    args.append(flag)
+if args != list(cfg.get("args") or []):
+    cfg["args"] = args
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=1)
+        f.write("\n")
+print("prompt-cache-tail:", "on" if on else "off", flush=True)
+PYTAIL
 
 # --- 并发流: 默认单流, 开机(systemd 读 json)/手动启动都先把 parallel 清掉 ---
 # 实测双 3080 (0.1.43.0): 每 slot 吃 ~1.55 GiB 显存/stage(专家热层 -22%) + ~11.6 GiB pinned RAM,

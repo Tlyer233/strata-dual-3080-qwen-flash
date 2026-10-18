@@ -18,6 +18,7 @@ Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This fi
 * **MTP**：源 https://huggingface.co/ukisai/Swift-Qwen3.8-Flash-Next （BF16 `mtp.*` → `pack_official_mtp.sh` 打 q2_0 → `~/src/Strata-data/mtp/rt/`，0.79 G）
 * **补丁（必打）**：`patches/ple-only-native-dense-v0.1.43.1.patch` — 上游 #1233 未修：外挂 PLE-only 单张量表撞 Swift shard 2 的 split.no，
   不打则启动即 `native dense: duplicate split shard number` 崩溃循环。44.1 树原样可打。
+  Codex 插话 / 尾部分叉另打：`patches/prompt-cache-tail-layer-split.patch`（上游 `--prompt-cache-tail` 写死 `!multi_gpu`，0.1.45 仍是；双卡各 stage 在尾巴 chunk 存 part）。启动器 `PROMPT_CACHE_TAIL=1`（默认）写入 `--prompt-cache-tail`。
 * **script**：
   - `launch_swift_abliterated_iq3s_q8ple_512k.sh` = **当前在用 512K**：ctx 524288 + `--rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144 免传）+ 停放槽 3 + 检查点池 14（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
   - `launch_swift_abliterated_iq3s_q8ple.sh` = 256K 版（ctx 268288，无 rope flag，槽 6 池 28）。三 launcher 共用 `~/src/Strata/strata-swift-…-q8ple.json`，**谁最后启动谁赢**。
@@ -95,6 +96,22 @@ prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5
   **非 yarn 税**（yarn on/off 同负载对照未做）。
 - 1M：本机未测。上游 YaRN×4 1M 3/3，但 llama.cpp 同族在 YaRN×4 有 ~2×orig（520K）prefill 崩溃先例
   （[llama.cpp#27090](https://github.com/ggml-org/llama.cpp/issues/27090)）；62 G 机器 1M 停放无望。
+
+#### 双卡 `--prompt-cache-tail`（Codex 插话尾部分叉；2026-10-18，`results/prompt_cache_tail_split_20261018.txt`）
+
+上游 `--prompt-cache-tail` 只给单卡（`generate.cpp` `!multi_gpu`，0.1.45 仍是）。Codex 插话 = 掐断当前请求、丢掉助手半截、把新句子接在上一句完整话后面重发 → 尾部分叉，不是追加。`--prompt-cache-every 131072` 下分叉最多回退 128K。本机补丁：去掉该限制，layer-split 各 stage 在尾巴 chunk 也存 part。启动器默认 `PROMPT_CACHE_TAIL=1`。打法：`patch -p1 -i patches/prompt-cache-tail-layer-split.patch`（Strata 根）。本次测在本机源码重编后的引擎上（boot 日志 `session is up (engine 0.1.44.1)`），512K launcher，`PREFILL=8192`。
+
+```
+  run                      prompt  reused     read  wall_s  note
+--------------------------------------------------------------------------------
+  A  cold fill              22141       0    22141    11.5  log: tail ckpt @ 16384 (2*8192)
+  B  tail fork              22141   16384     5757     5.0  last line changed; 74% prefix hit
+  B  without patch (infer)  22141       0    22141   ~11.5  prompt < every 131072, no mid ckpt
+```
+
+- 同前缀、只改最后一句（模拟 Codex 插话）。A 打出 `prompt-cache-tail checkpoint at 16384 tokens (layer split)`；B 复用 16384，墙钟 11.5 s → 5.0 s。
+- 无补丁时 22141 < 131072，没有周期旗杆，B 会再走整段（A 那行就是对照）。
+- 旗杆约占 118 MB RAM/根，不占显存。`PROMPT_CACHE_TAIL=0` 关掉写入。
 
 
 ### Strata 0.1.44.1（2026-10-15 实测后回滚；model / ngram / MTP 同 0.1.43.1，#1233 补丁同样必打）
@@ -411,10 +428,12 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `scripts/decode_bench.py` | bench：单次测量（服务端 timings 优先） |
 | `scripts/needle_512k.py` | **512K NIAH 埋点**：5 针 × 5 深度，单请求，严格 `KEY=<code>` 判分（复用 decode_bench 原语） |
 | `launch_swift_abliterated_iq3s_q8ple.sh` | 256K IQ3_S+PLE 启动器（单流订死；JSON_ONLY=1 只写 json 不启动） |
-| `launch_swift_abliterated_iq3s_q8ple_512k.sh` | **512K 启动器（当前在用）**：ctx 524288 + yarn×2 + 槽 3 + 池 14 |
+| `launch_swift_abliterated_iq3s_q8ple_512k.sh` | **512K 启动器（当前在用）**：ctx 524288 + yarn×2 + 槽 3 + 池 14 + `PROMPT_CACHE_TAIL=1` |
 | `launch_swift_abliterated_iq3s_q8ple_multi.sh` | multi-slot 入口（PARALLEL / BATCH_MODE=draft|pipe） |
 | `systemd/strata-swift.service` | user unit；ExecStart=256K 启动器；**unit env 才是 PARALLEL/CONV_* 杠杆** |
 | `patches/ple-only-native-dense-v0.1.43.1.patch` | #1233 外挂 PLE 启动修复（**必打**；44.1 树原样可打） |
+| `patches/prompt-cache-tail-layer-split.patch` | 双卡 `--prompt-cache-tail`（上游 `!multi_gpu`；Codex 插话尾部分叉） |
+| `results/prompt_cache_tail_split_20261018.txt` | 2026-10-18 同前缀分叉：B 16384 reused / 5.0 s vs A 0 reused / 11.5 s |
 | `results/43_1_patch_1.json` | 256K 基线原始数据（43.1+PREFILL 8192） |
 | `results/44_1_1.json` / `results/iq3_4096_1024reserve.json` | 44.1 全量（回滚依据）/ 43.0 对照 |
 | `results/512_yarn_1.json` + `results/needle_512k(_full).json` + `results/needle_sanity.json` | **512K 八档测速 + 埋点 5/5 原始数据（2026-10-16）** |
