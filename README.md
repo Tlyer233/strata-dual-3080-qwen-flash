@@ -9,7 +9,7 @@ Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This fi
 
 ## 版本实测（按引擎版本；每版本 = model / ngram / script / 该版本实测表）
 
-### Strata 0.1.43.1（当前在用；本机基准引擎，sm_86 源码编译）
+### Strata 0.1.43.1（历史基准；本机长期主力引擎，sm_86 源码编译）
 
 * **model**：https://huggingface.co/slider-meister-pub/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S-GGUF
   （IQ3_S abliterated 2 分片 + mmproj BF16 + SHA256SUMS，79 G；本机 `~/models/slider-meister-pub/…/`，`--native` 指分片1）
@@ -18,7 +18,8 @@ Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This fi
 * **MTP**：源 https://huggingface.co/ukisai/Swift-Qwen3.8-Flash-Next （BF16 `mtp.*` → `pack_official_mtp.sh` 打 q2_0 → `~/src/Strata-data/mtp/rt/`，0.79 G）
 * **补丁（必打）**：`patches/ple-only-native-dense-v0.1.43.1.patch` — 上游 #1233 未修：外挂 PLE-only 单张量表撞 Swift shard 2 的 split.no，
   不打则启动即 `native dense: duplicate split shard number` 崩溃循环。44.1 树原样可打。
-  Codex 插话 / 尾部分叉另打：`patches/prompt-cache-tail-layer-split.patch`（上游 `--prompt-cache-tail` 写死 `!multi_gpu`，0.1.45 仍是；双卡各 stage 在尾巴 chunk 存 part）。启动器 `PROMPT_CACHE_TAIL=1`（默认）写入 `--prompt-cache-tail`。
+  Codex 插话 / 尾部分叉曾另打 `patches/prompt-cache-tail-layer-split.patch`（上游 `--prompt-cache-tail` 写死 `!multi_gpu`，0.1.45 仍是；双卡各 stage 在尾巴 chunk 存 part）。
+  **2026-10-18 起撤掉**（收效甚微，判据见「双卡 --prompt-cache-tail」一节），launcher `PROMPT_CACHE_TAIL` 默认改 0；补丁存档在 git 历史 commit 16c3762。
 * **script**：
   - `launch_swift_abliterated_iq3s_q8ple_512k.sh` = **当前在用 512K**：ctx 524288 + `--rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144 免传）+ 停放槽 3 + 检查点池 14（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
   - `launch_swift_abliterated_iq3s_q8ple.sh` = 256K 版（ctx 268288，无 rope flag，槽 6 池 28）。三 launcher 共用 `~/src/Strata/strata-swift-…-q8ple.json`，**谁最后启动谁赢**。
@@ -112,6 +113,9 @@ prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5
 - 同前缀、只改最后一句（模拟 Codex 插话）。A 打出 `prompt-cache-tail checkpoint at 16384 tokens (layer split)`；B 复用 16384，墙钟 11.5 s → 5.0 s。
 - 无补丁时 22141 < 131072，没有周期旗杆，B 会再走整段（A 那行就是对照）。
 - 旗杆约占 118 MB RAM/根，不占显存。`PROMPT_CACHE_TAIL=0` 关掉写入。
+- **2026-10-18 撤掉这份补丁**：省时间的只有「prompt 短于 `--prompt-cache-every` 且正好拐在尾巴 chunk 边」这一格；真实 Codex 插话的 prompt 长度不固定，
+  长 prompt 照样退到 128K 周期旗杆 → 收效甚微。0.1.45 树不再打，launcher `PROMPT_CACHE_TAIL` 默认 0，等官方支持多卡尾巴检测点再开回来。
+  （4090 单卡官方就支持 tail，那边不受 `!multi_gpu` 限制，已在用。）
 
 
 ### Strata 0.1.44.1（2026-10-15 实测后回滚；model / ngram / MTP 同 0.1.43.1，#1233 补丁同样必打）
@@ -140,6 +144,41 @@ prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5
 - 观察：44 系 resident 从 24.63 GiB 涨到 27.60 GiB（pinned RAM 多 ~3 G，挤停放预算），mtp 接受率 60-74%（43.1 同脚本 74-94%）。
 - **本机建议：留 0.1.43.1**（回滚一条命令：`systemctl --user stop strata-swift && cp ~/src/Strata/engine/strata.bak-0.1.43.1p ~/src/Strata/engine/strata && systemctl --user start strata-swift`）。
 - #1233 PLE 补丁在 44.1 仍必打（`patches/ple-only-native-dense-v0.1.43.1.patch` 原样可打到 44.1 树，行号偏移不影响 patch -p1 上下文匹配）。
+
+### Strata 0.1.45（当前在用；2026-10-18 官方源码编译 sm_86，只带 #1233 PLE 补丁）
+
+* **换法**：gh-proxy 拉 `v0.1.45.zip` 解到 `~/src/Strata-0.1.45` → **只打** `patches/ple-only-native-dense-v0.1.43.1.patch`（0.1.45 仍未修 #1233，不打启动即崩）
+  → `cmake -G Ninja -DSTRATA_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=~/venvs/sglang-0519/…/cu13/bin/nvcc`
+  `-DCMAKE_CUDA_FLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK -DSTRATA_GGML_DIR=~/src/Strata/third_party/llama.cpp` → `ninja -C build strata`（145 目标，约 2 分钟）
+  + `build-vision`（275 目标，约 4 分钟）。官方 release 只有 Windows 包，Linux 只能源码编。
+  换二进制要先 unlink 再拷（运行中的 inode 会「文本文件忙」），本机模型加载 **235 s**。
+* **双卡 `--prompt-cache-tail` 补丁按决定不再打**：0.1.45 树 = 干净官方树 + PLE 补丁，launcher `PROMPT_CACHE_TAIL` 默认 **0**（引擎 cmdline 里已无该 flag，实测确认）。
+* **script**：仍是 `launch_swift_abliterated_iq3s_q8ple_512k.sh`（ctx 524288 + YaRN×2 + 槽 3 / 池 14 + `PREFILL=8192`，单流 `total_slots=1`）。
+* **回滚**：`systemctl --user stop strata-swift && mv -f ~/src/Strata/engine/strata.bak-0.1.44.1p ~/src/Strata/engine/strata && mv -f ~/src/Strata/engine/strata-vision.bak-0.1.44.1p ~/src/Strata/engine/strata-vision && systemctl --user start strata-swift`。
+
+#### 0.1.45 + YaRN×2 @ 512K（ctx 524288，PLE 补丁，槽 3 / 池 14，PREFILL=8192，单流；bench 2026-10-18 14:2x，`results/45_512k_1.json`）
+
+```
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    85.5    83.8    66.4    79.6    87.3    75.2   107.2    85.3    80.5    88.6    83.9  |       5.1     0.09      1543
+   32k    75.2    83.3    67.8    76.7    80.3    73.9    83.7    81.9    80.3    75.9    77.9  |      12.9     0.22      2432
+   64k    65.9    72.4    70.0    73.6    74.3    69.1    90.2    70.7    79.9    73.8    74.0  |      23.0     0.38      2724
+  128k    74.5    71.7    64.6    72.3    78.3    71.2    83.0    77.0    77.8    80.2    75.1  |      43.6     0.73      2869
+  200k    66.1    77.3    65.5    72.2    75.9    71.4    77.4    75.2    72.9    78.7    73.3  |      68.2     1.14      2870
+  256k    72.8    75.1    64.2    70.3    80.6    72.4    88.8    80.5    74.9    73.5    75.3  |      88.6     1.48      2825
+  384k    76.1    70.5    65.1    66.7    66.5    65.0    91.2    65.8    73.6    63.8    70.4  |     136.8     2.28      2745
+  512k    76.9    71.2    60.7    65.6    72.3    67.2    84.3    79.5    74.1    69.7    72.2  |     190.7     3.18      2622
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    74.1    75.7    65.5    72.1    76.9    70.7    88.2    77.0    76.8    75.5    75.3
+```
+
+- **本机目前最快的一版**：decode AVG **75.3**（0.1.43.1 同配置 72.9，**+3.3%**；0.1.44.1 当年全档 -5% 已回滚）。
+  分档：8k 72.3→**83.9（+16%）**、256k 72.9→75.3、512k 69.8→**72.2（+3.4%）**；64k 77.3→74.0（-4.3%）是唯一明显回落档，384k 持平。
+- **prefill 全面 +20~28%**：32k 2024→2432、128k 2234→2869、512k 2114→**2622**；512K 冷读 **236.6 s → 190.7 s**。
+  口径要说清：基线那轮 `PREFILL=4096`，本轮 8192，所以这块收益里有一部分来自块大小而非版本（0.1.45 release notes 的方向正是「更大的默认 prompt 块 + 新 decode 内核」）。
+- 模型 id 现为 **`qwen-flash-next`**（json `model_name`）；旧名 `swift-1.5-abliterated-iq3_s-q8ple` 打过来仍会跑，只是不再出现在 `/v1/models` 里。
+
 
 ### 老版本速记（无全量十类表）
 

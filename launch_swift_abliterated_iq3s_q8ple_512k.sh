@@ -108,14 +108,15 @@ fi
 # --- --prompt-cache-tail: 尾巴再插一根旗杆 (Codex 插话 / 尾部分叉) ---
 # 人话: 每次快读完时, 在尾巴再插一根旗杆. 插话通常拐在尾巴, 下一轮只重读最后
 #   几千 token (一个 --prefill chunk, 本机 8192), 不是 128K.
-# 官方 generate.cpp 写死 !multi_gpu (0.1.45 仍是). 本机 2026-10-18 补丁: 去掉该限制,
-#   双卡各 stage 在尾巴 chunk 也存 part, checkpoint_at(..., as_tail).
-#   备份: ubuntu_handoff/strata/bak-prompt-cache-tail-20261018/
-# 本机实测 2026-10-18 3080×2 split=26, prompt 22141 < every 131072:
-#   A 0 reused + 22141 / 11.4 s; 尾巴旗杆打在 16384 (2*8192);
-#   B 同前缀换最后一句: 16384 reused + 5757 / 4.9 s. 无补丁时 B 会 0 reused 再走 11 s.
-# 4090 单卡官方就能开, 不需要这份补丁.
-# PROMPT_CACHE_TAIL=0 关掉写入. 池满时最先丢掉这根尾巴旗杆. 多占约 118 MB RAM, 0 显存.
+# 官方 generate.cpp 把这条写死 !multi_gpu (0.1.45 仍是) -> 双卡官方吃不到。本机 2026-10-18 自己
+#   打过补丁 (去掉 !multi_gpu, 双卡各 stage 在尾巴 chunk 也存 part)，实测 3080×2 split=26,
+#   prompt 22141 < every 131072: A 0 reused + 22141 / 11.4 s; B 同前缀换最后一句 16384 reused
+#   + 5757 / 4.9 s。看着漂亮，其实收效甚微: 只有"prompt 短于 every 且正好拐在尾巴 chunk 边"
+#   这一格省时间, 真实 Codex 插话的 prompt 长度不固定, 长 prompt 照样退到 128K 周期旗杆。
+#   2026-10-18 决定: 补丁撤了 (0.1.45 起不打), 等官方支持多卡尾巴检测点。
+#   补丁存档在 sdd3080 仓的 git 历史 (patches/prompt-cache-tail-layer-split.patch, commit 16c3762)。
+# 4090 单卡官方就能开 tail, 那边不受这条限制。
+# 默认 0 = 不往 json 写 --prompt-cache-tail; 官方哪天支持多卡, PROMPT_CACHE_TAIL=1 直接开回来。
 # --conversation-cache-min-tokens 4096 (官方 PR #1597): 短请求不再占停放槽把长会话顶掉
 #   (那条实测: 3 条几百 token 的短请求顶掉 19198 token 长会话 -> 41.4 s 重读; 设门槛后 0.3 s, 304x).
 CONV_CACHE_MIB="${CONV_CACHE_MIB:-19456}"
@@ -124,7 +125,7 @@ CONV_CACHE_MIN_FREE_MIB="${CONV_CACHE_MIN_FREE_MIB:-4096}"
 CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-4096}"
 PROMPT_CACHE_N="${PROMPT_CACHE_N:-14}"
 PROMPT_CACHE_EVERY="${PROMPT_CACHE_EVERY:-131072}"
-PROMPT_CACHE_TAIL="${PROMPT_CACHE_TAIL:-1}"
+PROMPT_CACHE_TAIL="${PROMPT_CACHE_TAIL:-0}"
 CCPY_BIN="$ROOT/.venv/bin/python"
 [ -x "$CCPY_BIN" ] || CCPY_BIN="$(command -v python3)"
 "$CCPY_BIN" - "$CFG" \

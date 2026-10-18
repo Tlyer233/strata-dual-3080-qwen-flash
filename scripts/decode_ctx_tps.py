@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decode t/s sweep over context depth on an OpenAI /v1 endpoint.
 
-Tiers: 8k 32k 64k 128k 200k 256k 384k 512k, skipping what n_ctx cannot fit.
+Tiers: 8k 32k 64k 128k 200k 256k 384k 512k 768k 1M, skipping what n_ctx cannot fit.
 Measurement lives in decode_bench.py. Asks for a result name, writes JSON
 under ~/ubuntu_handoff/results.
 """
@@ -29,6 +29,8 @@ TIERS = (
     ("256k", 256 * 1024),
     ("384k", 384 * 1024),
     ("512k", 512 * 1024),
+    ("768k", 768 * 1024),
+    ("1M", 1024 * 1024),
 )
 TG = 256
 SLACK = 256
