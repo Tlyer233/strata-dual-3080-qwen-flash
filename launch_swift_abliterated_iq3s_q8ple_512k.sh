@@ -119,84 +119,72 @@ fi
 # 默认 0 = 不往 json 写 --prompt-cache-tail; 官方哪天支持多卡, PROMPT_CACHE_TAIL=1 直接开回来。
 # --conversation-cache-min-tokens 4096 (官方 PR #1597): 短请求不再占停放槽把长会话顶掉
 #   (那条实测: 3 条几百 token 的短请求顶掉 19198 token 长会话 -> 41.4 s 重读; 设门槛后 0.3 s, 304x).
-CONV_CACHE_MIB="${CONV_CACHE_MIB:-19456}"
+#
+# --- 2026-10-18 第二轮: 3080 整段重读的真凶是 RAM 闸门, 不是旗杆 ---
+# 逐字翻本机日志: skip parking 244 次, "= 0 reused" 537 次, evictions 累计 80,
+#   最惨一条 prompt 500187 = 0 reused + 500187 read in 190.7 s (2622 t/s)。
+# 账: 一条 500K 快照 snapshot_bytes=6.93 GB (13.85 KB/token), 而 available 只有 4.4 GB
+#   -> 物理 RAM 闸门 (generate.cpp:8972) 直接拒停放, 官方注释写明拒了就等于把这段读取全扔。
+#   闸门公式: 快照 MiB + 地板 MiB <= MemAvailable。地板 4096 时一条 500K 要 11.0 G 余量, 两条 18.0 G。
+# RAM 大头是 --resident-experts 的专家 RAM 层: 实测 31.63 GiB, 引擎 RSS 35.6 GB, 总 64.2 GB。
+#   官方源码 530/2604 行: 这层吃满到只剩 resident_headroom, 默认 4 GiB —— 正好就是 available 4.4 GB。
+#   官方留了 A/B 臂 STRATA_RESIDENT_HEADROOM_GIB=N (源码 2609 行) = 给停放腾地方, 代价是专家命中率。
+# 所以本机: headroom 4->20 GiB (专家层 31.63 -> ~15.6 GiB), 槽 3->2, 地板 4096->2048
+#   -> 2 条 500K 停放 13.9 G + 旗杆 2.7 G = 16.6 G <= 20 G 闸门, 停得住, 不再整段重读。
+# tail 本机仍吃不到 (官方写死 !multi_gpu, 补丁已撤); 但 spread 没被 gate (走同一条 spread_victim)
+#   -> 双卡直接开: 池满时保留摊开的旗杆, 改写历史 N token 就只重读 ~N。
+#   池 14 对 500K 会话太小 (4 根周期 + ~20 根轮次 > 14), 尾巴附近的根先被逐 -> 14->24 (114 MB/根, 2.7 G)。
+# --- 2026-10-19 回退: 尾巴旗杆 / 摊开保留 / 停放槽 全删, 只留 live 续读 ---
+# 只写 --prompt-cache N + --prompt-cache-every E: 这是当前会话的 live 续读, 正常对话不重读全靠它。
+#   源码 generate.cpp:14483  live_ok = o.prompt_cache > 0 && req_ckpt  ->  设成 0 就是每轮 token 0 全量 prefill。
+# 停放写 --conversation-cache-mib 0: 不再把整段 KV 拷进宿主 RAM, 不占槽, 不驱逐。
+# 上面 DROP_PREFIX 把 json 里所有 --conversation-cache* / --prompt-cache* 旧值一次清干净再写回。
+# 旗杆官方 6x16384。停放：切 slot 用，mib=0 就是换会话全量 prefill。3080 三槽。
+PROMPT_CACHE_N="${PROMPT_CACHE_N:-6}"
+PROMPT_CACHE_EVERY="${PROMPT_CACHE_EVERY:-16384}"
+CONV_CACHE_MIB="${CONV_CACHE_MIB:-16384}"
 CONV_CACHE_SLOTS="${CONV_CACHE_SLOTS:-3}"
-CONV_CACHE_MIN_FREE_MIB="${CONV_CACHE_MIN_FREE_MIB:-4096}"
 CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-4096}"
-PROMPT_CACHE_N="${PROMPT_CACHE_N:-14}"
-PROMPT_CACHE_EVERY="${PROMPT_CACHE_EVERY:-131072}"
-PROMPT_CACHE_TAIL="${PROMPT_CACHE_TAIL:-0}"
+CONV_CACHE_MIN_FREE_MIB="${CONV_CACHE_MIN_FREE_MIB:-2560}"
 CCPY_BIN="$ROOT/.venv/bin/python"
 [ -x "$CCPY_BIN" ] || CCPY_BIN="$(command -v python3)"
-"$CCPY_BIN" - "$CFG" \
-  --conversation-cache-mib "$CONV_CACHE_MIB" \
-  --conversation-cache-slots "$CONV_CACHE_SLOTS" \
-  --conversation-cache-min-free-mib "$CONV_CACHE_MIN_FREE_MIB" \
-  --conversation-cache-min-tokens "$CONV_CACHE_MIN_TOKENS" \
-  --prompt-cache "$PROMPT_CACHE_N" \
-  --prompt-cache-every "$PROMPT_CACHE_EVERY" \
-  --rope-scaling "$ROPE_SCALING" --rope-scale "$ROPE_SCALE" <<'CCPY'
+"$CCPY_BIN" - "$CFG" "$PROMPT_CACHE_N" "$PROMPT_CACHE_EVERY" \
+  "$CONV_CACHE_MIB" "$CONV_CACHE_SLOTS" "$CONV_CACHE_MIN_TOKENS" "$CONV_CACHE_MIN_FREE_MIB" <<'PYCACHE'
 import json, os, shutil, sys
-
-path = sys.argv[1]
-want = dict(zip(sys.argv[2::2], sys.argv[3::2]))
+path, n, every, mib, slots, mintok, minfree = sys.argv[1:8]
+DROP_PREFIX = ("--conversation-cache", "--prompt-cache")
 with open(path, encoding="utf-8") as f:
     cfg = json.load(f)
-args = list(cfg.get("args") or [])
-
-def get(args, flag):
-    for i, a in enumerate(args):
-        if a == flag and i + 1 < len(args):
-            return args[i + 1]
-    return None
-
-def upsert(args, flag, val):
-    out, i, done = [], 0, False
-    while i < len(args):
-        if args[i] == flag:
-            if not done:
-                out += [flag, val]
-                done = True
-            i += 1
-            while i < len(args) and not str(args[i]).startswith("-"):
-                i += 1
-            continue
-        out.append(args[i])
+old = list(cfg.get("args") or [])
+args, i = [], 0
+while i < len(old):
+    if any(old[i].startswith(p) for p in DROP_PREFIX):
         i += 1
-    if not done:
-        out += [flag, val]
-    return out
-
-if all(get(args, f) == v for f, v in want.items()):
-    print("conversation cache: 配置里已是这些值, 不改")
-    raise SystemExit(0)
-for flag, val in want.items():
-    args = upsert(args, flag, val)
-cfg["args"] = args
-if not os.path.exists(path + ".bak-conv-cache"):
-    shutil.copy2(path, path + ".bak-conv-cache")
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=1)
-    f.write("\n")
-print("conversation cache: 已写入 " + "  ".join(f"{f} {v}" for f, v in want.items()))
-CCPY
-echo "conversation cache: 预算 ${CONV_CACHE_MIB} MiB / 槽 ${CONV_CACHE_SLOTS} / RAM 地板 ${CONV_CACHE_MIN_FREE_MIB} MiB / 短请求门槛 ${CONV_CACHE_MIN_TOKENS} tok / 检查点池 ${PROMPT_CACHE_N} x every ${PROMPT_CACHE_EVERY} tok  tail=${PROMPT_CACHE_TAIL}  (CONV_CACHE_MIB=0 关掉停放)" >&2
-"$CCPY_BIN" - "$CFG" "$PROMPT_CACHE_TAIL" <<'PYTAIL'
-import json, sys
-path, on = sys.argv[1], sys.argv[2] not in ("0", "false", "no", "")
-flag = "--prompt-cache-tail"
-with open(path, encoding="utf-8") as f:
-    cfg = json.load(f)
-args = [a for a in (cfg.get("args") or []) if a != flag]
-if on:
-    args.append(flag)
-if args != list(cfg.get("args") or []):
+        if i < len(old) and not str(old[i]).startswith("-"):
+            i += 1
+        continue
+    args.append(old[i])
+    i += 1
+args += [
+    "--prompt-cache", n, "--prompt-cache-every", every,
+    "--conversation-cache-mib", mib,
+    "--conversation-cache-slots", slots,
+    "--conversation-cache-min-tokens", mintok,
+    "--conversation-cache-min-free-mib", minfree,
+]
+if args != old:
+    if not os.path.exists(path + ".bak-revert"):
+        shutil.copy2(path, path + ".bak-revert")
     cfg["args"] = args
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=1)
         f.write("\n")
-print("prompt-cache-tail:", "on" if on else "off", flush=True)
-PYTAIL
+print("cache:", " ".join(args[j] + (" " + args[j + 1] if j + 1 < len(args) and not str(args[j + 1]).startswith("-") else "")
+                         for j, a in enumerate(args)
+                         if a.startswith("--prompt") or a.startswith("--conversation")))
+PYCACHE
+echo "cache: --prompt-cache ${PROMPT_CACHE_N} --prompt-cache-every ${PROMPT_CACHE_EVERY} --conversation-cache-mib ${CONV_CACHE_MIB} --conversation-cache-slots ${CONV_CACHE_SLOTS}" >&2
+
 
 # --- 并发流: 默认单流, 开机(systemd 读 json)/手动启动都先把 parallel 清掉 ---
 # 实测双 3080 (0.1.43.0): 每 slot 吃 ~1.55 GiB 显存/stage(专家热层 -22%) + ~11.6 GiB pinned RAM,
@@ -246,6 +234,9 @@ unset STRATA_ARENA_PIN_GIB
 unset STRATA_RESIDENT_PIN
 unset STRATA_STAGE_PIN
 unset STRATA_GDN_CHUNKED
+# 专家 RAM 层给停放让路 (官方 A/B 臂, 源码 2609 行; 默认 4 GiB -> 本机 available 只剩 4.4 G,
+#   一条 500K 快照 6.93 G 停不下 -> 0 reused 整段重读 190 s)。decode 命中率掉多少要实测。
+export STRATA_RESIDENT_HEADROOM_GIB="${STRATA_RESIDENT_HEADROOM_GIB:-20}"
 export STRATA_PREFILL_HELP="${STRATA_PREFILL_HELP:-1}"
 export STRATA_PREFILL_CPU_SHARE="${STRATA_PREFILL_CPU_SHARE:-auto}"
 export STRATA_PREFILL_CPU_SHARE_MAX="${STRATA_PREFILL_CPU_SHARE_MAX:-3072}"

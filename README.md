@@ -2,6 +2,12 @@
 
 Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This file is for an agent, not a human. Paths below are the reference PC unless remapped.
 
+**当前状态（2026-10-20）**：引擎已升到 **Strata 0.1.45**（官方源码编译 sm_86，只带 #1233 PLE 补丁；0.1.42 / 43 / 43.1 / 44.1 都已下树，换法见「Strata 0.1.45」一节），
+模型换成 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，n-gram 仍用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`，和 Swift 那版同一张表），MTP 沿用 `mtp/rt`；
+ctx 524288 + YaRN×2、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=8192`、单流、vision gpu、`effort_position: "end"`。
+实测 decode AVG **79.7**（8k→512k 八档十类，`results/davidau_iq3.json`），512K 冷读 **172.0 s / 2906 t/s**；上一版 Swift 同配置是 75.3 / 190.7 s。
+开机默认 = `launch_davidau_iq3s_q8ple_512k.sh`（`~/.config/systemd/user/strata-swift.service.d/override.conf` 的 ExecStart）。
+
 **IQ3_XXS** (`launch_swift_iq3xxs.sh`): full RAM arena, ~70–80 tok/s decode on this box. Quant fits 64 GB.
 
 **IQ4_XS** (`launch_swift_iq4xs.sh`): dual-GPU **VRAM first, then RAM**. Upstream Strata v0.1.38 does not merge this yet. Method, patch, and citations: **[RESIDENT_ON_SPLIT.md](RESIDENT_ON_SPLIT.md)** ([Niko1221/Strata#604](https://github.com/Niko1221/Strata/issues/604), [#364](https://github.com/Niko1221/Strata/issues/364), [#384](https://github.com/Niko1221/Strata/issues/384), [PR #639](https://github.com/Niko1221/Strata/pull/639), [PR #640](https://github.com/Niko1221/Strata/pull/640), [PR #731](https://github.com/Niko1221/Strata/pull/731)).
@@ -179,6 +185,47 @@ prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5
   口径要说清：基线那轮 `PREFILL=4096`，本轮 8192，所以这块收益里有一部分来自块大小而非版本（0.1.45 release notes 的方向正是「更大的默认 prompt 块 + 新 decode 内核」）。
 - 模型 id 现为 **`qwen-flash-next`**（json `model_name`）；旧名 `swift-1.5-abliterated-iq3_s-q8ple` 打过来仍会跑，只是不再出现在 `/v1/models` 里。
 
+
+#### 0.1.45 + DavidAU IQ3_S + YaRN×2 @ 512K（**当前在用**；换模型不换引擎，bench 2026-10-20 14:03，`results/davidau_iq3.json`）
+
+* **model**：https://huggingface.co/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/tree/main
+  （GSQ-RCO abliterated IQ3_S：分片1 `55063664928` + 分片2 `28800138432` + `mmproj-Qwen3.8-Flash-Next-BF16.gguf` `907543008`；本机 `~/models/DavidAU/…/`，`--native` 指分片1）
+* **ngram（PLE，外挂 Q8_0，替换原生 IQ4_NL shard 2）**：还是那一个 https://huggingface.co/sleepyeldrazi/Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-GGUF/tree/main
+  （51 G；本机 `~/models/sleepyeldrazi/…-00002-of-00002.gguf`，`--ple-gguf`。同底座同 tokenizer，Swift 那版和 DavidAU 这版共用同一张 Q8_0 表，不用重下）
+* **shard 2 必须落盘（本轮新踩，值得记）**：文件名是 `-00001-of-00002`，Strata `include/strata/artifact/gguf_split.hpp:45` 把 1..N 逐个 `ifstream` 打开，
+  **打不开就抛 `missing model shard … (shard 2 of 2; is the download complete?)`**，`GgufModel` 构造还要求每片都是合法 GGUF（`split.count/no/tensors.count` 与分片1 对得上）。
+  它不看内容：shard 2 里只有一个张量 `per_layer_token_embd.weight`（IQ4_NL n-gram 表，160×320001536×0.5625 B = 28800138432，逐字节对得上），
+  我们已用 `--ple-gguf` 换成 Q8_0，**但那 28.8 G 还是得在**，否则引擎 `exit code 2`，视觉编码器也报 `cannot open the text model`。
+  `tools/iq_pack.py` 同样硬要 shard 2 才肯跑。省法：先只下 shard1 + mmproj（53 G），pack 在另一台分片下全的机器上打好再 rsync 过来（1.5 G / 13 s @111 MB/s），
+  shard 2 走局域网拷（28.8 G / 4 min 54 s @93 MB/s，2.5 GbE），比从镜像重下（9.4 MB/s ≈ 51 min）快一个数量级。
+* **pack**：`tools/iq_pack.py --gguf <shard1> --out ~/src/Strata-data/packs/davidau-gsq-rco-iq3_s` → `dense.bin` 1538035200 + `tokenizer/chat_template.jinja`（从 GGUF 导出，与模型页 / Strata 内置卡片一致）。
+* **MTP**：沿用 `~/src/Strata-data/mtp/rt`（Swift 官方 `mtp.*` → q2_0），换模型不用重打。
+* **script**：`launch_davidau_iq3s_q8ple_512k.sh` = 512K 启动器的换模型版（`gpus 1,0` + `layer_split 26`、ctx 524288 + yarn×2、k8v4、`PREFILL=8192`、
+  旗杆 `6×16384`、停放 `16384 MiB / 3 槽 / min-tokens 4096 / min-free 2560`、`--resident-experts`、`--pipeline-windows 2`、vision gpu、单流）。
+  json 快照 `example-strata-davidau-iq3_s-q8ple.json`（含 `effort_position: "end"`）。**开机单元 drop-in 已指这份脚本**（2026-10-20，`~/.config/systemd/user/strata-swift.service.d/override.conf`）。
+* **温度**：不钉。模型页 = Strata 卡片：thinking `1.0 / 0.95 / 20`，instruct `0.7 / 0.8 / 20 + presence_penalty 1.5`。
+  本机 `serve/server.py` 不认 `sampling.force`（boot 日志逐字：`config sampling.force=True: unknown key, ignored`），config 里的 1.0/0.95/20 只是默认值，客户端传什么就用什么。
+
+```
+  tier      code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |    pre_s  pre_min  pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k      88.6    84.9    75.5    78.2    93.7    78.0   105.1    88.9    90.4    92.0    87.5  |      6.7     0.11     1188
+   32k      82.4    84.1    66.1    78.6    86.9    74.7   105.8    81.0    85.6    80.4    82.6  |     15.6     0.26     2012
+   64k      84.3    83.1    76.0    81.9    87.2    77.7    91.1    84.4    83.7    81.9    83.1  |     22.7     0.38     2763
+  128k      83.1    86.8    68.3    75.9    78.0    67.2    94.8    81.8    79.4    70.8    78.6  |     41.4     0.69     3020
+  200k      70.3    67.6    68.2    72.8    87.4    77.1    99.0    82.0    75.9    73.5    77.4  |     65.7     1.09     2977
+  256k      77.1    82.9    69.6    76.9    86.8    76.8   100.8    82.4    84.4    74.0    81.2  |     83.2     1.39     3007
+  384k      72.3    69.7    65.6    70.4    66.5    73.7   103.6    78.2    74.2    76.0    75.0  |    130.7     2.18     2871
+  512k      68.4    74.4    66.9    70.8    75.8    66.2    88.1    76.9    69.3    65.3    72.2  |    172.0     2.87     2906
+------------------------------------------------------------------------------------------------------------------------------
+   AVG      78.3    79.2    69.5    75.7    82.8    73.9    98.5    82.0    80.4    76.7    79.7
+```
+
+- **decode 全面高于同机 Swift 版**：AVG **75.3 → 79.7（+5.9%）**；64k +12.4%、256k +7.8%、384k +6.5%、200k +5.6%、512k 持平（72.2）。这是本机目前最高的一版。
+- **prefill**：512K 冷读 **190.7 s → 172.0 s（-9.8%，2906 t/s）**；64k 以上 +1.4~+10.8%。
+  **但 8k/32k 反而慢**（1543→1188、2432→2012）：这两档是引擎重启后第一批跑的，专家热层 / expert-profile 还没热，别当结论；要准就重跑一轮。
+- 口径：同机同引擎同 ctx 同 `PREFILL=8192` 同单流，只差 model + pack + n-gram 来源；两轮 prompt token 数几乎一致（512k 档 499721 vs 500187），`tg=256`、`runs=1`、`flush_per_tier`、thinking off。
+- **2026-10-20 本机状态**：开机默认 = 这份 DavidAU 启动器；Swift 的 GGUF（79 G）和它的 pack（1.5 G）已从本机删除，`results/45_512k_1.json` 那套 Swift 数据只作历史对照。
 
 ### 老版本速记（无全量十类表）
 
@@ -467,7 +514,10 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `scripts/decode_bench.py` | bench：单次测量（服务端 timings 优先） |
 | `scripts/needle_512k.py` | **512K NIAH 埋点**：5 针 × 5 深度，单请求，严格 `KEY=<code>` 判分（复用 decode_bench 原语） |
 | `launch_swift_abliterated_iq3s_q8ple.sh` | 256K IQ3_S+PLE 启动器（单流订死；JSON_ONLY=1 只写 json 不启动） |
-| `launch_swift_abliterated_iq3s_q8ple_512k.sh` | **512K 启动器（当前在用）**：ctx 524288 + yarn×2 + 槽 3 + 池 14 + `PROMPT_CACHE_TAIL=1` |
+| `launch_swift_abliterated_iq3s_q8ple_512k.sh` | 512K 启动器（Swift 版，历史）：ctx 524288 + yarn×2 + 旗杆 `6×16384` + 停放 `16384/3/4096/2560`，`PROMPT_CACHE_TAIL` 默认 0 |
+| `launch_davidau_iq3s_q8ple_512k.sh` | **当前开机在用**：DavidAU IQ3_S + Q8_0 PLE 的 512K 启动器（换模型版，参数同上那行） |
+| `example-strata-davidau-iq3_s-q8ple.json` | DavidAU live json 快照（2026-10-20，含 `effort_position: "end"`） |
+| `results/davidau_iq3.json` | **DavidAU 八档十类原始数据（2026-10-20，decode AVG 79.7 / 512k 冷读 172.0 s）** |
 | `launch_swift_abliterated_iq3s_q8ple_multi.sh` | multi-slot 入口（PARALLEL / BATCH_MODE=draft|pipe） |
 | `systemd/strata-swift.service` | user unit；ExecStart=256K 启动器；**unit env 才是 PARALLEL/CONV_* 杠杆** |
 | `patches/ple-only-native-dense-v0.1.43.1.patch` | #1233 外挂 PLE 启动修复（**必打**；44.1 树原样可打） |
