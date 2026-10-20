@@ -15,142 +15,6 @@ ctx 524288 + YaRN×2、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=8192`、�
 
 ## 版本实测（按引擎版本；每版本 = model / ngram / script / 该版本实测表）
 
-### Strata 0.1.43.1（历史基准；本机长期主力引擎，sm_86 源码编译）
-
-* **model**：https://huggingface.co/slider-meister-pub/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S-GGUF
-  （IQ3_S abliterated 2 分片 + mmproj BF16 + SHA256SUMS，79 G；本机 `~/models/slider-meister-pub/…/`，`--native` 指分片1）
-* **ngram（PLE，外挂 Q8_0，替换原生 IQ4_NL shard 2）**：https://huggingface.co/sleepyeldrazi/Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-GGUF/tree/main
-  （51 G；本机 `~/models/sleepyeldrazi/…-00002-of-00002.gguf`，`--ple-gguf`）
-* **MTP**：源 https://huggingface.co/ukisai/Swift-Qwen3.8-Flash-Next （BF16 `mtp.*` → `pack_official_mtp.sh` 打 q2_0 → `~/src/Strata-data/mtp/rt/`，0.79 G）
-* **补丁（必打）**：`patches/ple-only-native-dense-v0.1.43.1.patch` — 上游 #1233 未修：外挂 PLE-only 单张量表撞 Swift shard 2 的 split.no，
-  不打则启动即 `native dense: duplicate split shard number` 崩溃循环。44.1 树原样可打。
-  Codex 插话 / 尾部分叉曾另打 `patches/prompt-cache-tail-layer-split.patch`（上游 `--prompt-cache-tail` 写死 `!multi_gpu`，0.1.45 仍是；双卡各 stage 在尾巴 chunk 存 part）。
-  **2026-10-18 起撤掉**（收效甚微，判据见「双卡 --prompt-cache-tail」一节），launcher `PROMPT_CACHE_TAIL` 默认改 0；补丁存档在 git 历史 commit 16c3762。
-* **script**：
-  - `launch_swift_abliterated_iq3s_q8ple_512k.sh` = **当前在用 512K**：ctx 524288 + `--rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144 免传）+ 停放槽 3 + 检查点池 14（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
-  - `launch_swift_abliterated_iq3s_q8ple.sh` = 256K 版（ctx 268288，无 rope flag，槽 6 池 28）。三 launcher 共用 `~/src/Strata/strata-swift-…-q8ple.json`，**谁最后启动谁赢**。
-  - `launch_swift_abliterated_iq3s_q8ple_multi.sh` = 双路（PARALLEL=2，BATCH_MODE=draft|pipe，定案见下文 A/B）。
-  - `systemd/strata-swift.service`：开机默认单元（ExecStart 现仍指 256K 脚本；**unit env 才是 PARALLEL/CONV_* 杠杆**，json 不是）。
-    2026-10-16 状态：**已加 drop-in**（`~/.config/systemd/user/strata-swift.service.d/override.conf`，ExecStart→512K 启动器），下次开机自启即 512K；回 256K = 删 drop-in。
-  - `JSON_ONLY=1 bash <launcher>`：只写 json 不启动、不 pkill（干跑验证用）。
-  - YaRN 坑：缩放整进程固定（缓存 K 是 post-RoPE，"one run one scaling"），切 rope 模式必须重启；>262144 官方口径必须 yarn
-    （上游 DETAILS.md 同款 IQ3_S：293K NLL yarn2 2.04 vs 裸 2.22 = 3-4× 噪声，≤32K 无退化，421K yarn2 QA 8/8；1M 才需要 yarn4）。
-  - json 快照：`example-strata-swift-abliterated-iq3_s-q8ple.json`（512K 版，2026-10-16）。
-  - 下载法：有梯子 `https_proxy=http://127.0.0.1:7897` + `aria2c -c` 走官方 resolve；无梯子换 hf-mirror（详见 03_downloads_mirrors.md）。
-
-#### 0.1.43.1 @ 256K（ctx 268288，PLE 补丁，PREFILL=8192，单流；bench 2026-10-13 20:23，原始数据 `results/43_1_patch_1.json`）
-
-```
-  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
-------------------------------------------------------------------------------------------------------------------------------
-    8k    90.3    97.1    74.9    83.2   103.6    93.3    96.1    90.6    94.5    96.2    92.0  |       4.9     0.08      1608
-   32k    76.4    89.8    72.3    80.4    89.8    82.9    95.0   100.5    87.8    75.7    85.1  |      12.3     0.21      2548
-   64k    81.3    80.4    80.0    75.7    88.3    91.8    97.8    97.3    77.1    80.5    85.0  |      22.2     0.37      2831
-  128k    81.5    84.6    77.8    83.4    91.2    85.0    97.2    89.2    79.2    84.6    85.4  |      42.1     0.70      2977
-  200k    77.1    82.9    66.0    78.5    87.6    80.7    87.9    86.5    86.8    75.7    81.0  |      66.4     1.11      2950
-  256k    73.8    77.3    79.7    78.7    83.5    84.5    87.5    87.4    81.4    83.9    81.8  |      85.6     1.43      2928
-------------------------------------------------------------------------------------------------------------------------------
-   AVG    80.1    85.4    75.1    80.0    90.7    86.4    93.6    91.9    84.5    82.8    85.0
-```
-
-- decode 全档位真实文本 **AVG 85.0 t/s**（10 类测试各有，才测得出专家交换的负载；单流）。
-- prefill：`PREFILL=8192` 后 64K+ **2831-2977 t/s ≈ RTX 4090 单卡（~3000）**；8K 档 1608（短 prompt 吃不满 8192 窗）。
-- 版本对照（同一微基准，短 ctx）：decode 0.1.42 **93** → 0.1.43 **95.2** → **0.1.43.1 101.8/152.8 t/s**（draft 接受率 ~93% 不变，纯窗口速度）；
-  prefill 25K 冷 ~1750（0.1.42，PREFILL=4096）→ 2062（0.1.43.1，PREFILL=4096）→ **2928-2977（0.1.43.1 + PREFILL=8192）**。
-- 43.1 的 decode 增益来自**默认开启**的 `R4 hit path ON`（resident experts computed on GPU）+ `token graph hit path`（设备端决策）；
-  release notes 的 "RTX 30 decode +5-11%" 是 Q2_0-pack 的 Q3_K kernel，**IQ3_S 不吃**；`STRATA_ADAPT_OVERLAP` 对本机无效
-  （boot 日志：`is off: not on a layer split`）。
-- 对照组：`results/iq3_4096_1024reserve.json`（2026-10-12 15:12，v0.1.43 + PREFILL=4096 / VRAM_RESERVE=1024）。
-
-
-#### 0.1.43.1 + YaRN×2 @ 512K（ctx 524288，PLE 补丁，槽 3 / 池 14，PREFILL=4096，单流；bench 2026-10-16，原始数据 `results/512_yarn_1.json`）
-
-```
-  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
-------------------------------------------------------------------------------------------------------------------------------
-    8k    62.6    62.3    68.4    73.6    84.0    70.6    82.8    73.5    66.5    78.3    72.3  |       5.2     0.09      1513
-   32k    66.6    68.3    62.5    70.4    73.3    72.6    87.8    71.2    72.7    78.1    72.3  |      15.5     0.26      2024
-   64k    78.9    81.1    72.5    71.0    78.3    73.4    87.6    74.4    77.4    78.0    77.3  |      28.2     0.47      2222
-  128k    71.7    74.5    62.7    69.2    76.2    73.8    92.2    80.5    76.2    73.2    75.0  |      56.0     0.93      2234
-  200k    71.9    79.8    59.3    69.9    74.8    68.6    89.3    73.9    73.4    74.4    73.5  |      86.4     1.44      2263
-  256k    66.8    75.5    63.5    65.0    74.1    69.3    92.5    72.8    70.3    79.3    72.9  |     112.5     1.87      2226
-  384k    69.3    69.7    70.9    67.0    73.7    66.2    83.7    69.9    68.6    65.4    70.4  |     174.3     2.91      2154
-  512k    66.2    72.5    68.1    62.7    69.9    65.8    86.1    67.8    66.9    71.8    69.8  |     236.6     3.94      2114
-------------------------------------------------------------------------------------------------------------------------------
-   AVG    69.2    73.0    66.0    68.6    75.5    70.0    87.8    73.0    71.5    74.8    72.9
-```
-
-#### 埋点 NIAH @512K（`scripts/needle_512k.py`，5 针 × 5 深度，严格 KEY=<code> 判定）
-
-```
-prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5/5 PASS
-  depth  10%  ALPHA    CFBU-1981   ✓        depth  70%  DELTA    KZQ8-2208   ✓
-  depth  30%  BRAVO    2S6T-8747   ✓        depth  90%  ECHO     88UE-0921   ✓   (最深针 ~444K token 位)
-  depth  50%  CHARLIE  HKCE-6908   ✓
-复测 472,481 tok: 5/5 (`results/needle_512k_full.json` / `results/needle_512k.json`)；8k sanity: 5/5 (`results/needle_sanity.json`)
-```
-
-- **256K→512K 边际成本 ≈ 4-5%**：decode AVG 72.9→69.8，prefill 2226→2114 t/s；8k→512k 全程 decode 才 -3.4%
-  （GDN 线性注意力 O(1)，decode 对长度近乎平坦——与上游 "decode is flat in context" 说法一致）。
-- 512K 冷 prefill：500,183 tok **236.6 s（3.94 分钟）** @2114 t/s。该深度 decode 63-86 t/s（针测实测 63-76）。
-- **512K 配置**（`launch_swift_abliterated_iq3s_q8ple_512k.sh`，快照 `example-strata-swift-abliterated-iq3_s-q8ple.json`）：
-  `--max-context 524288 --rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144，免传）；
-  停放槽 6→**3**、检查点池 28→**14**（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
-- **为什么带 YaRN**：上游 `docs/DETAILS.md` 同款 IQ3_S 实测 293K 处 yarn2 NLL 2.04 vs 裸 2.22（3-4× 噪声），≤32K 无退化，421K yarn2 长文 QA 8/8；
-  上游 [PR #1692](https://www.stratat.com/en/pulls/1692)：普通 RoPE 512K 埋点 3/3、普通 RoPE 1M 0/3、YaRN×4 1M 3/3。
-  引擎口径：rope 缩放整进程固定（缓存 K 是 post-RoPE），无按请求切换；>262K 官方就是要 yarn。
-- 本表低档位比同日早间 8192 基线低 10-15%：系 **PREFILL=4096 + 会话负载**（引擎内同时驻留 ~140K 工作会话 + 停放长文），
-  **非 yarn 税**（yarn on/off 同负载对照未做）。
-- 1M：本机未测。上游 YaRN×4 1M 3/3，但 llama.cpp 同族在 YaRN×4 有 ~2×orig（520K）prefill 崩溃先例
-  （[llama.cpp#27090](https://github.com/ggml-org/llama.cpp/issues/27090)）；62 G 机器 1M 停放无望。
-
-#### 双卡 `--prompt-cache-tail`（Codex 插话尾部分叉；2026-10-18，`results/prompt_cache_tail_split_20261018.txt`）
-
-上游 `--prompt-cache-tail` 只给单卡（`generate.cpp` `!multi_gpu`，0.1.45 仍是）。Codex 插话 = 掐断当前请求、丢掉助手半截、把新句子接在上一句完整话后面重发 → 尾部分叉，不是追加。`--prompt-cache-every 131072` 下分叉最多回退 128K。本机补丁：去掉该限制，layer-split 各 stage 在尾巴 chunk 也存 part。启动器默认 `PROMPT_CACHE_TAIL=1`。打法：`patch -p1 -i patches/prompt-cache-tail-layer-split.patch`（Strata 根）。本次测在本机源码重编后的引擎上（boot 日志 `session is up (engine 0.1.44.1)`），512K launcher，`PREFILL=8192`。
-
-```
-  run                      prompt  reused     read  wall_s  note
---------------------------------------------------------------------------------
-  A  cold fill              22141       0    22141    11.5  log: tail ckpt @ 16384 (2*8192)
-  B  tail fork              22141   16384     5757     5.0  last line changed; 74% prefix hit
-  B  without patch (infer)  22141       0    22141   ~11.5  prompt < every 131072, no mid ckpt
-```
-
-- 同前缀、只改最后一句（模拟 Codex 插话）。A 打出 `prompt-cache-tail checkpoint at 16384 tokens (layer split)`；B 复用 16384，墙钟 11.5 s → 5.0 s。
-- 无补丁时 22141 < 131072，没有周期旗杆，B 会再走整段（A 那行就是对照）。
-- 旗杆约占 118 MB RAM/根，不占显存。`PROMPT_CACHE_TAIL=0` 关掉写入。
-- **2026-10-18 撤掉这份补丁**：省时间的只有「prompt 短于 `--prompt-cache-every` 且正好拐在尾巴 chunk 边」这一格；真实 Codex 插话的 prompt 长度不固定，
-  长 prompt 照样退到 128K 周期旗杆 → 收效甚微。0.1.45 树不再打，launcher `PROMPT_CACHE_TAIL` 默认 0，等官方支持多卡尾巴检测点再开回来。
-  （4090 单卡官方就支持 tail，那边不受 `!multi_gpu` 限制，已在用。）
-
-
-### Strata 0.1.44.1（2026-10-15 实测后回滚；model / ngram / MTP 同 0.1.43.1，#1233 补丁同样必打）
-
-* **script**：同一套 launcher；换引擎 = stop 单元 → cp 二进制 → start（备份 `engine/strata.bak-0.1.43.1p` 带补丁）。
-  回滚一条命令：`systemctl --user stop strata-swift && cp ~/src/Strata/engine/strata.bak-0.1.43.1p ~/src/Strata/engine/strata && systemctl --user start strata-swift`。
-
-#### 0.1.44.1 @ 256K（本版本只测到 256K，PREFILL=8192，单流；bench 2026-10-15 12:5x，`results/44_1_1.json`）
-
-```
-  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
-------------------------------------------------------------------------------------------------------------------------------
-    8k    82.0    79.7    73.0    81.4    96.8    87.8    98.2    91.8    84.3    93.4    86.8  |       5.0     0.08      1574
-   32k    78.7    88.1    81.6    77.2    85.3    79.0    88.7    87.2    84.7    86.8    83.7  |      12.6     0.21      2492
-   64k    76.8    78.4    75.8    79.7    78.6    78.2    97.0    76.2    86.7    83.9    81.1  |      22.4     0.37      2796
-  128k    73.2    75.1    78.9    77.3    87.9    78.7    95.8    79.4    74.0    78.3    79.9  |      42.7     0.71      2932
-  200k    74.8    70.9    67.6    71.3    80.9    76.1    83.2    74.8    76.8    78.8    75.5  |      66.4     1.11      2945
-  256k    73.8    79.4    71.5    71.0    78.0    75.8    87.8    71.7    78.3    80.1    76.7  |      91.0     1.52      2747
-------------------------------------------------------------------------------------------------------------------------------
-   AVG    76.5    78.6    74.7    76.3    84.6    79.3    91.8    80.2    80.8    83.5    80.6
-```
-
-- **对比 v0.1.43.1 同套件（`results/43_1_patch_1.json`，AVG 85.0）：44.1 全档位一致回落 ~5%**
-  （92.0→86.8 / 85.1→83.7 / 85.0→81.1 / 85.4→79.9 / 81.0→75.5 / 81.8→76.7），
-  prefill 持平（2932-2945 中档，256k 2747 vs 2928 略降）。0.1.44.1 的修复项（老 CPU/CUDA 12.0/12.1/M2/setup 默认）与我们无关。
-- 观察：44 系 resident 从 24.63 GiB 涨到 27.60 GiB（pinned RAM 多 ~3 G，挤停放预算），mtp 接受率 60-74%（43.1 同脚本 74-94%）。
-- **本机建议：留 0.1.43.1**（回滚一条命令：`systemctl --user stop strata-swift && cp ~/src/Strata/engine/strata.bak-0.1.43.1p ~/src/Strata/engine/strata && systemctl --user start strata-swift`）。
-- #1233 PLE 补丁在 44.1 仍必打（`patches/ple-only-native-dense-v0.1.43.1.patch` 原样可打到 44.1 树，行号偏移不影响 patch -p1 上下文匹配）。
-
 ### Strata 0.1.45（当前在用；2026-10-18 官方源码编译 sm_86，只带 #1233 PLE 补丁）
 
 * **换法**：gh-proxy 拉 `v0.1.45.zip` 解到 `~/src/Strata-0.1.45` → **只打** `patches/ple-only-native-dense-v0.1.43.1.patch`（0.1.45 仍未修 #1233，不打启动即崩）
@@ -161,30 +25,6 @@ prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5
 * **双卡 `--prompt-cache-tail` 补丁按决定不再打**：0.1.45 树 = 干净官方树 + PLE 补丁，launcher `PROMPT_CACHE_TAIL` 默认 **0**（引擎 cmdline 里已无该 flag，实测确认）。
 * **script**：仍是 `launch_swift_abliterated_iq3s_q8ple_512k.sh`（ctx 524288 + YaRN×2 + 槽 3 / 池 14 + `PREFILL=8192`，单流 `total_slots=1`）。
 * **回滚**：`systemctl --user stop strata-swift && mv -f ~/src/Strata/engine/strata.bak-0.1.44.1p ~/src/Strata/engine/strata && mv -f ~/src/Strata/engine/strata-vision.bak-0.1.44.1p ~/src/Strata/engine/strata-vision && systemctl --user start strata-swift`。
-
-#### 0.1.45 + YaRN×2 @ 512K（ctx 524288，PLE 补丁，槽 3 / 池 14，PREFILL=8192，单流；bench 2026-10-18 14:2x，`results/45_512k_1.json`）
-
-```
-  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
-------------------------------------------------------------------------------------------------------------------------------
-    8k    85.5    83.8    66.4    79.6    87.3    75.2   107.2    85.3    80.5    88.6    83.9  |       5.1     0.09      1543
-   32k    75.2    83.3    67.8    76.7    80.3    73.9    83.7    81.9    80.3    75.9    77.9  |      12.9     0.22      2432
-   64k    65.9    72.4    70.0    73.6    74.3    69.1    90.2    70.7    79.9    73.8    74.0  |      23.0     0.38      2724
-  128k    74.5    71.7    64.6    72.3    78.3    71.2    83.0    77.0    77.8    80.2    75.1  |      43.6     0.73      2869
-  200k    66.1    77.3    65.5    72.2    75.9    71.4    77.4    75.2    72.9    78.7    73.3  |      68.2     1.14      2870
-  256k    72.8    75.1    64.2    70.3    80.6    72.4    88.8    80.5    74.9    73.5    75.3  |      88.6     1.48      2825
-  384k    76.1    70.5    65.1    66.7    66.5    65.0    91.2    65.8    73.6    63.8    70.4  |     136.8     2.28      2745
-  512k    76.9    71.2    60.7    65.6    72.3    67.2    84.3    79.5    74.1    69.7    72.2  |     190.7     3.18      2622
-------------------------------------------------------------------------------------------------------------------------------
-   AVG    74.1    75.7    65.5    72.1    76.9    70.7    88.2    77.0    76.8    75.5    75.3
-```
-
-- **本机目前最快的一版**：decode AVG **75.3**（0.1.43.1 同配置 72.9，**+3.3%**；0.1.44.1 当年全档 -5% 已回滚）。
-  分档：8k 72.3→**83.9（+16%）**、256k 72.9→75.3、512k 69.8→**72.2（+3.4%）**；64k 77.3→74.0（-4.3%）是唯一明显回落档，384k 持平。
-- **prefill 全面 +20~28%**：32k 2024→2432、128k 2234→2869、512k 2114→**2622**；512K 冷读 **236.6 s → 190.7 s**。
-  口径要说清：基线那轮 `PREFILL=4096`，本轮 8192，所以这块收益里有一部分来自块大小而非版本（0.1.45 release notes 的方向正是「更大的默认 prompt 块 + 新 decode 内核」）。
-- 模型 id 现为 **`qwen-flash-next`**（json `model_name`）；旧名 `swift-1.5-abliterated-iq3_s-q8ple` 打过来仍会跑，只是不再出现在 `/v1/models` 里。
-
 
 #### 0.1.45 + DavidAU IQ3_S + YaRN×2 @ 512K（**当前在用**；换模型不换引擎，bench 2026-10-20 14:03，`results/davidau_iq3.json`）
 
@@ -226,6 +66,166 @@ prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5
   **但 8k/32k 反而慢**（1543→1188、2432→2012）：这两档是引擎重启后第一批跑的，专家热层 / expert-profile 还没热，别当结论；要准就重跑一轮。
 - 口径：同机同引擎同 ctx 同 `PREFILL=8192` 同单流，只差 model + pack + n-gram 来源；两轮 prompt token 数几乎一致（512k 档 499721 vs 500187），`tg=256`、`runs=1`、`flush_per_tier`、thinking off。
 - **2026-10-20 本机状态**：开机默认 = 这份 DavidAU 启动器；Swift 的 GGUF（79 G）和它的 pack（1.5 G）已从本机删除，`results/45_512k_1.json` 那套 Swift 数据只作历史对照。
+
+#### 0.1.45 + YaRN×2 @ 512K（ctx 524288，PLE 补丁，槽 3 / 池 14，PREFILL=8192，单流；bench 2026-10-18 14:2x，`results/45_512k_1.json`）
+
+```
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    85.5    83.8    66.4    79.6    87.3    75.2   107.2    85.3    80.5    88.6    83.9  |       5.1     0.09      1543
+   32k    75.2    83.3    67.8    76.7    80.3    73.9    83.7    81.9    80.3    75.9    77.9  |      12.9     0.22      2432
+   64k    65.9    72.4    70.0    73.6    74.3    69.1    90.2    70.7    79.9    73.8    74.0  |      23.0     0.38      2724
+  128k    74.5    71.7    64.6    72.3    78.3    71.2    83.0    77.0    77.8    80.2    75.1  |      43.6     0.73      2869
+  200k    66.1    77.3    65.5    72.2    75.9    71.4    77.4    75.2    72.9    78.7    73.3  |      68.2     1.14      2870
+  256k    72.8    75.1    64.2    70.3    80.6    72.4    88.8    80.5    74.9    73.5    75.3  |      88.6     1.48      2825
+  384k    76.1    70.5    65.1    66.7    66.5    65.0    91.2    65.8    73.6    63.8    70.4  |     136.8     2.28      2745
+  512k    76.9    71.2    60.7    65.6    72.3    67.2    84.3    79.5    74.1    69.7    72.2  |     190.7     3.18      2622
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    74.1    75.7    65.5    72.1    76.9    70.7    88.2    77.0    76.8    75.5    75.3
+```
+
+- **本机目前最快的一版**：decode AVG **75.3**（0.1.43.1 同配置 72.9，**+3.3%**；0.1.44.1 当年全档 -5% 已回滚）。
+  分档：8k 72.3→**83.9（+16%）**、256k 72.9→75.3、512k 69.8→**72.2（+3.4%）**；64k 77.3→74.0（-4.3%）是唯一明显回落档，384k 持平。
+- **prefill 全面 +20~28%**：32k 2024→2432、128k 2234→2869、512k 2114→**2622**；512K 冷读 **236.6 s → 190.7 s**。
+  口径要说清：基线那轮 `PREFILL=4096`，本轮 8192，所以这块收益里有一部分来自块大小而非版本（0.1.45 release notes 的方向正是「更大的默认 prompt 块 + 新 decode 内核」）。
+- 模型 id 现为 **`qwen-flash-next`**（json `model_name`）；旧名 `swift-1.5-abliterated-iq3_s-q8ple` 打过来仍会跑，只是不再出现在 `/v1/models` 里。
+
+
+### Strata 0.1.44.1（2026-10-15 实测后回滚；model / ngram / MTP 同 0.1.43.1，#1233 补丁同样必打）
+
+* **script**：同一套 launcher；换引擎 = stop 单元 → cp 二进制 → start（备份 `engine/strata.bak-0.1.43.1p` 带补丁）。
+  回滚一条命令：`systemctl --user stop strata-swift && cp ~/src/Strata/engine/strata.bak-0.1.43.1p ~/src/Strata/engine/strata && systemctl --user start strata-swift`。
+
+#### 0.1.44.1 @ 256K（本版本只测到 256K，PREFILL=8192，单流；bench 2026-10-15 12:5x，`results/44_1_1.json`）
+
+```
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    82.0    79.7    73.0    81.4    96.8    87.8    98.2    91.8    84.3    93.4    86.8  |       5.0     0.08      1574
+   32k    78.7    88.1    81.6    77.2    85.3    79.0    88.7    87.2    84.7    86.8    83.7  |      12.6     0.21      2492
+   64k    76.8    78.4    75.8    79.7    78.6    78.2    97.0    76.2    86.7    83.9    81.1  |      22.4     0.37      2796
+  128k    73.2    75.1    78.9    77.3    87.9    78.7    95.8    79.4    74.0    78.3    79.9  |      42.7     0.71      2932
+  200k    74.8    70.9    67.6    71.3    80.9    76.1    83.2    74.8    76.8    78.8    75.5  |      66.4     1.11      2945
+  256k    73.8    79.4    71.5    71.0    78.0    75.8    87.8    71.7    78.3    80.1    76.7  |      91.0     1.52      2747
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    76.5    78.6    74.7    76.3    84.6    79.3    91.8    80.2    80.8    83.5    80.6
+```
+
+- **对比 v0.1.43.1 同套件（`results/43_1_patch_1.json`，AVG 85.0）：44.1 全档位一致回落 ~5%**
+  （92.0→86.8 / 85.1→83.7 / 85.0→81.1 / 85.4→79.9 / 81.0→75.5 / 81.8→76.7），
+  prefill 持平（2932-2945 中档，256k 2747 vs 2928 略降）。0.1.44.1 的修复项（老 CPU/CUDA 12.0/12.1/M2/setup 默认）与我们无关。
+- 观察：44 系 resident 从 24.63 GiB 涨到 27.60 GiB（pinned RAM 多 ~3 G，挤停放预算），mtp 接受率 60-74%（43.1 同脚本 74-94%）。
+- **本机建议：留 0.1.43.1**（回滚一条命令：`systemctl --user stop strata-swift && cp ~/src/Strata/engine/strata.bak-0.1.43.1p ~/src/Strata/engine/strata && systemctl --user start strata-swift`）。
+- #1233 PLE 补丁在 44.1 仍必打（`patches/ple-only-native-dense-v0.1.43.1.patch` 原样可打到 44.1 树，行号偏移不影响 patch -p1 上下文匹配）。
+
+### Strata 0.1.43.1（历史基准；本机长期主力引擎，sm_86 源码编译）
+
+* **model**：https://huggingface.co/slider-meister-pub/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S-GGUF
+  （IQ3_S abliterated 2 分片 + mmproj BF16 + SHA256SUMS，79 G；本机 `~/models/slider-meister-pub/…/`，`--native` 指分片1）
+* **ngram（PLE，外挂 Q8_0，替换原生 IQ4_NL shard 2）**：https://huggingface.co/sleepyeldrazi/Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-GGUF/tree/main
+  （51 G；本机 `~/models/sleepyeldrazi/…-00002-of-00002.gguf`，`--ple-gguf`）
+* **MTP**：源 https://huggingface.co/ukisai/Swift-Qwen3.8-Flash-Next （BF16 `mtp.*` → `pack_official_mtp.sh` 打 q2_0 → `~/src/Strata-data/mtp/rt/`，0.79 G）
+* **补丁（必打）**：`patches/ple-only-native-dense-v0.1.43.1.patch` — 上游 #1233 未修：外挂 PLE-only 单张量表撞 Swift shard 2 的 split.no，
+  不打则启动即 `native dense: duplicate split shard number` 崩溃循环。44.1 树原样可打。
+  Codex 插话 / 尾部分叉曾另打 `patches/prompt-cache-tail-layer-split.patch`（上游 `--prompt-cache-tail` 写死 `!multi_gpu`，0.1.45 仍是；双卡各 stage 在尾巴 chunk 存 part）。
+  **2026-10-18 起撤掉**（收效甚微，判据见「双卡 --prompt-cache-tail」一节），launcher `PROMPT_CACHE_TAIL` 默认改 0；补丁存档在 git 历史 commit 16c3762。
+* **script**：
+  - `launch_swift_abliterated_iq3s_q8ple_512k.sh` = **当前在用 512K**：ctx 524288 + `--rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144 免传）+ 停放槽 3 + 检查点池 14（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
+  - `launch_swift_abliterated_iq3s_q8ple.sh` = 256K 版（ctx 268288，无 rope flag，槽 6 池 28）。三 launcher 共用 `~/src/Strata/strata-swift-…-q8ple.json`，**谁最后启动谁赢**。
+  - `launch_swift_abliterated_iq3s_q8ple_multi.sh` = 双路（PARALLEL=2，BATCH_MODE=draft|pipe，定案见下文 A/B）。
+  - `systemd/strata-swift.service`：开机默认单元（ExecStart 现仍指 256K 脚本；**unit env 才是 PARALLEL/CONV_* 杠杆**，json 不是）。
+    2026-10-16 状态：**已加 drop-in**（`~/.config/systemd/user/strata-swift.service.d/override.conf`，ExecStart→512K 启动器），下次开机自启即 512K；回 256K = 删 drop-in。
+  - `JSON_ONLY=1 bash <launcher>`：只写 json 不启动、不 pkill（干跑验证用）。
+  - YaRN 坑：缩放整进程固定（缓存 K 是 post-RoPE，"one run one scaling"），切 rope 模式必须重启；>262144 官方口径必须 yarn
+    （上游 DETAILS.md 同款 IQ3_S：293K NLL yarn2 2.04 vs 裸 2.22 = 3-4× 噪声，≤32K 无退化，421K yarn2 QA 8/8；1M 才需要 yarn4）。
+  - json 快照：`example-strata-swift-abliterated-iq3_s-q8ple.json`（512K 版，2026-10-16）。
+  - 下载法：有梯子 `https_proxy=http://127.0.0.1:7897` + `aria2c -c` 走官方 resolve；无梯子换 hf-mirror（详见 03_downloads_mirrors.md）。
+
+#### 双卡 `--prompt-cache-tail`（Codex 插话尾部分叉；2026-10-18，`results/prompt_cache_tail_split_20261018.txt`）
+
+上游 `--prompt-cache-tail` 只给单卡（`generate.cpp` `!multi_gpu`，0.1.45 仍是）。Codex 插话 = 掐断当前请求、丢掉助手半截、把新句子接在上一句完整话后面重发 → 尾部分叉，不是追加。`--prompt-cache-every 131072` 下分叉最多回退 128K。本机补丁：去掉该限制，layer-split 各 stage 在尾巴 chunk 也存 part。启动器默认 `PROMPT_CACHE_TAIL=1`。打法：`patch -p1 -i patches/prompt-cache-tail-layer-split.patch`（Strata 根）。本次测在本机源码重编后的引擎上（boot 日志 `session is up (engine 0.1.44.1)`），512K launcher，`PREFILL=8192`。
+
+```
+  run                      prompt  reused     read  wall_s  note
+--------------------------------------------------------------------------------
+  A  cold fill              22141       0    22141    11.5  log: tail ckpt @ 16384 (2*8192)
+  B  tail fork              22141   16384     5757     5.0  last line changed; 74% prefix hit
+  B  without patch (infer)  22141       0    22141   ~11.5  prompt < every 131072, no mid ckpt
+```
+
+- 同前缀、只改最后一句（模拟 Codex 插话）。A 打出 `prompt-cache-tail checkpoint at 16384 tokens (layer split)`；B 复用 16384，墙钟 11.5 s → 5.0 s。
+- 无补丁时 22141 < 131072，没有周期旗杆，B 会再走整段（A 那行就是对照）。
+- 旗杆约占 118 MB RAM/根，不占显存。`PROMPT_CACHE_TAIL=0` 关掉写入。
+- **2026-10-18 撤掉这份补丁**：省时间的只有「prompt 短于 `--prompt-cache-every` 且正好拐在尾巴 chunk 边」这一格；真实 Codex 插话的 prompt 长度不固定，
+  长 prompt 照样退到 128K 周期旗杆 → 收效甚微。0.1.45 树不再打，launcher `PROMPT_CACHE_TAIL` 默认 0，等官方支持多卡尾巴检测点再开回来。
+  （4090 单卡官方就支持 tail，那边不受 `!multi_gpu` 限制，已在用。）
+
+
+#### 埋点 NIAH @512K（`scripts/needle_512k.py`，5 针 × 5 深度，严格 KEY=<code> 判定）
+
+```
+prompt=493,734 tok (=1.88× 训练长 262,144)  单请求一次问 5 针   ->  5/5 PASS
+  depth  10%  ALPHA    CFBU-1981   ✓        depth  70%  DELTA    KZQ8-2208   ✓
+  depth  30%  BRAVO    2S6T-8747   ✓        depth  90%  ECHO     88UE-0921   ✓   (最深针 ~444K token 位)
+  depth  50%  CHARLIE  HKCE-6908   ✓
+复测 472,481 tok: 5/5 (`results/needle_512k_full.json` / `results/needle_512k.json`)；8k sanity: 5/5 (`results/needle_sanity.json`)
+```
+
+- **256K→512K 边际成本 ≈ 4-5%**：decode AVG 72.9→69.8，prefill 2226→2114 t/s；8k→512k 全程 decode 才 -3.4%
+  （GDN 线性注意力 O(1)，decode 对长度近乎平坦——与上游 "decode is flat in context" 说法一致）。
+- 512K 冷 prefill：500,183 tok **236.6 s（3.94 分钟）** @2114 t/s。该深度 decode 63-86 t/s（针测实测 63-76）。
+- **512K 配置**（`launch_swift_abliterated_iq3s_q8ple_512k.sh`，快照 `example-strata-swift-abliterated-iq3_s-q8ple.json`）：
+  `--max-context 524288 --rope-scaling yarn --rope-scale 2`（`--yarn-orig-ctx` 默认 262144，免传）；
+  停放槽 6→**3**、检查点池 28→**14**（停放实测：快照 **18.5-35 KB/token**，满长 512K ≈ **10-15 GiB/条**，19456 MiB 预算只够 ~1-2 条满长；纯 KV k8v4 9.2 KB/tok 的估算是低估，快照不止存 K/V）。
+- **为什么带 YaRN**：上游 `docs/DETAILS.md` 同款 IQ3_S 实测 293K 处 yarn2 NLL 2.04 vs 裸 2.22（3-4× 噪声），≤32K 无退化，421K yarn2 长文 QA 8/8；
+  上游 [PR #1692](https://www.stratat.com/en/pulls/1692)：普通 RoPE 512K 埋点 3/3、普通 RoPE 1M 0/3、YaRN×4 1M 3/3。
+  引擎口径：rope 缩放整进程固定（缓存 K 是 post-RoPE），无按请求切换；>262K 官方就是要 yarn。
+- 本表低档位比同日早间 8192 基线低 10-15%：系 **PREFILL=4096 + 会话负载**（引擎内同时驻留 ~140K 工作会话 + 停放长文），
+  **非 yarn 税**（yarn on/off 同负载对照未做）。
+- 1M：本机未测。上游 YaRN×4 1M 3/3，但 llama.cpp 同族在 YaRN×4 有 ~2×orig（520K）prefill 崩溃先例
+  （[llama.cpp#27090](https://github.com/ggml-org/llama.cpp/issues/27090)）；62 G 机器 1M 停放无望。
+
+#### 0.1.43.1 + YaRN×2 @ 512K（ctx 524288，PLE 补丁，槽 3 / 池 14，PREFILL=4096，单流；bench 2026-10-16，原始数据 `results/512_yarn_1.json`）
+
+```
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    62.6    62.3    68.4    73.6    84.0    70.6    82.8    73.5    66.5    78.3    72.3  |       5.2     0.09      1513
+   32k    66.6    68.3    62.5    70.4    73.3    72.6    87.8    71.2    72.7    78.1    72.3  |      15.5     0.26      2024
+   64k    78.9    81.1    72.5    71.0    78.3    73.4    87.6    74.4    77.4    78.0    77.3  |      28.2     0.47      2222
+  128k    71.7    74.5    62.7    69.2    76.2    73.8    92.2    80.5    76.2    73.2    75.0  |      56.0     0.93      2234
+  200k    71.9    79.8    59.3    69.9    74.8    68.6    89.3    73.9    73.4    74.4    73.5  |      86.4     1.44      2263
+  256k    66.8    75.5    63.5    65.0    74.1    69.3    92.5    72.8    70.3    79.3    72.9  |     112.5     1.87      2226
+  384k    69.3    69.7    70.9    67.0    73.7    66.2    83.7    69.9    68.6    65.4    70.4  |     174.3     2.91      2154
+  512k    66.2    72.5    68.1    62.7    69.9    65.8    86.1    67.8    66.9    71.8    69.8  |     236.6     3.94      2114
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    69.2    73.0    66.0    68.6    75.5    70.0    87.8    73.0    71.5    74.8    72.9
+```
+
+#### 0.1.43.1 @ 256K（ctx 268288，PLE 补丁，PREFILL=8192，单流；bench 2026-10-13 20:23，原始数据 `results/43_1_patch_1.json`）
+
+```
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    90.3    97.1    74.9    83.2   103.6    93.3    96.1    90.6    94.5    96.2    92.0  |       4.9     0.08      1608
+   32k    76.4    89.8    72.3    80.4    89.8    82.9    95.0   100.5    87.8    75.7    85.1  |      12.3     0.21      2548
+   64k    81.3    80.4    80.0    75.7    88.3    91.8    97.8    97.3    77.1    80.5    85.0  |      22.2     0.37      2831
+  128k    81.5    84.6    77.8    83.4    91.2    85.0    97.2    89.2    79.2    84.6    85.4  |      42.1     0.70      2977
+  200k    77.1    82.9    66.0    78.5    87.6    80.7    87.9    86.5    86.8    75.7    81.0  |      66.4     1.11      2950
+  256k    73.8    77.3    79.7    78.7    83.5    84.5    87.5    87.4    81.4    83.9    81.8  |      85.6     1.43      2928
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    80.1    85.4    75.1    80.0    90.7    86.4    93.6    91.9    84.5    82.8    85.0
+```
+
+- decode 全档位真实文本 **AVG 85.0 t/s**（10 类测试各有，才测得出专家交换的负载；单流）。
+- prefill：`PREFILL=8192` 后 64K+ **2831-2977 t/s ≈ RTX 4090 单卡（~3000）**；8K 档 1608（短 prompt 吃不满 8192 窗）。
+- 版本对照（同一微基准，短 ctx）：decode 0.1.42 **93** → 0.1.43 **95.2** → **0.1.43.1 101.8/152.8 t/s**（draft 接受率 ~93% 不变，纯窗口速度）；
+  prefill 25K 冷 ~1750（0.1.42，PREFILL=4096）→ 2062（0.1.43.1，PREFILL=4096）→ **2928-2977（0.1.43.1 + PREFILL=8192）**。
+- 43.1 的 decode 增益来自**默认开启**的 `R4 hit path ON`（resident experts computed on GPU）+ `token graph hit path`（设备端决策）；
+  release notes 的 "RTX 30 decode +5-11%" 是 Q2_0-pack 的 Q3_K kernel，**IQ3_S 不吃**；`STRATA_ADAPT_OVERLAP` 对本机无效
+  （boot 日志：`is off: not on a layer split`）。
+- 对照组：`results/iq3_4096_1024reserve.json`（2026-10-12 15:12，v0.1.43 + PREFILL=4096 / VRAM_RESERVE=1024）。
+
 
 ### 老版本速记（无全量十类表）
 
