@@ -2,11 +2,13 @@
 
 Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This file is for an agent, not a human. Paths below are the reference PC unless remapped.
 
-**当前状态（2026-10-20）**：引擎已升到 **Strata 0.1.45**（官方源码编译 sm_86，只带 #1233 PLE 补丁；0.1.42 / 43 / 43.1 / 44.1 都已下树，换法见「Strata 0.1.45」一节），
-模型换成 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，n-gram 仍用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`，和 Swift 那版同一张表），MTP 沿用 `mtp/rt`；
-ctx 524288 + YaRN×2、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=8192`、单流、vision gpu、`effort_position: "end"`。
-实测 decode AVG **79.7**（8k→512k 八档十类，`results/davidau_iq3.json`），512K 冷读 **172.0 s / 2906 t/s**；上一版 Swift 同配置是 75.3 / 190.7 s。
-开机默认 = `launch_davidau_iq3s_q8ple_512k.sh`（`~/.config/systemd/user/strata-swift.service.d/override.conf` 的 ExecStart）。
+**当前状态（2026-10-22）**：引擎已升到 **Strata 0.2.2**（官方 tag `v0.2.2` 源码编译 sm_86，仍只带 #1233 PLE 补丁；
+**该 tag 的 `CMakeLists.txt` 里 `project(strata VERSION 0.1.47)`，所以 `strata --version` 打的是 0.1.47**，认版本看源码树，见「Strata 0.2.2」一节），
+模型仍是 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，n-gram 仍用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/rt`；
+**ctx 从 524288 + YaRN×2 换成 262144 无 YaRN**（256K 是模型原生训练 ctx，不用外推）、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=16384`、单流、vision gpu、`effort_position: "end"`。
+实测 decode AVG **94.6**（8k→256k 六档十类，`results/davidau_iq3_256k.json`），256K 冷读 **78.1 s / 3195 t/s**；
+同 ctx 的 0.1.43.1 基线是 85.0 / 85.6 s，512K 那版（0.1.45 + YaRN×2）是 79.7 / 172.0 s。
+开机默认 = `launch_davidau_iq3s_q8ple_256k.sh`（`~/.config/systemd/user/strata-swift.service.d/override.conf` 的 ExecStart，2026-10-22 改的）。
 
 **IQ3_XXS** (`launch_swift_iq3xxs.sh`): full RAM arena, ~70–80 tok/s decode on this box. Quant fits 64 GB.
 
@@ -15,7 +17,59 @@ ctx 524288 + YaRN×2、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=8192`、�
 
 ## 版本实测（按引擎版本；每版本 = model / ngram / script / 该版本实测表）
 
-### Strata 0.1.45（当前在用；2026-10-18 官方源码编译 sm_86，只带 #1233 PLE 补丁）
+### Strata 0.2.2（当前在用；2026-10-21 官方 tag `v0.2.2` 源码编译 sm_86，只带 #1233 PLE 补丁）
+
+* **版本命名坑（先说，别对着 `--version` 找 0.2.2）**：官方 tag `v0.2.2` 的 `CMakeLists.txt:11` 还是 `project(strata VERSION 0.1.47)`，
+  `STRATA_VERSION` 取 `PROJECT_VERSION` → `strata --version` 打 **0.1.47**；`engine/BUILD.json` 里甚至是上一版留下的 `"version": "0.1.45"`
+  （换二进制时 `src=skip`，那个文件没重写）。认版本的可靠办法：比对源码树 + sha256。本机在线的两个二进制逐字等于 0.2.2 树的产物
+  （`engine/strata` = `~/src/Strata-0.2.2/build/strata`，`60d11fc4…`；`engine/strata-vision` = `build-vision/bin/strata-vision`，`6ffc8eac…`）。
+* **换法**：`v0.2.2.zip` 走 gh-proxy 解到 `~/src/Strata-0.2.2` → **`patches/ple-only-native-dense-v0.1.43.1.patch` 还得打**（0.2.2 依旧没修 #1233，不打启动即崩
+  `duplicate split shard number`），但**行号已挪**：补丁 hunk 头是 `generate.cpp` 第 2551 行，0.2.2 树里 `ple_only` 那段在 3225 行，直接 `patch` 会拒，按 `ple_only` 逐字贴进去即可
+  → `cmake -G Ninja -DSTRATA_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 …` → `ninja` 出 `strata` + `build-vision`（先 unlink 再拷，运行中的 inode 会「文本文件忙」）。
+  本机冷启到可对话 **约 2 分钟**（256K 无 YaRN；日志逐字：`FileExpertSource: mapped pinned cache complement ready: resident 32.48 GiB, pinned 32.48 GiB in 56 s`，
+  光 page-locked 常驻专家层就 56 s。0.1.45 @512K 那版模型加载是 235 s，ctx 减半 + 不用 YaRN 后快一半）。
+* **换 ctx 不换模型**：256K = 模型原生训练 ctx，所以 `--rope-scaling none --rope-scale 1`，**YaRN×2 撤掉**；`PREFILL` 8192 → **16384**；停放 `16384/3` → **`20480/5`**；旗杆仍 `6×16384`。
+* **script**：[launch_davidau_iq3s_q8ple_256k.sh](launch_davidau_iq3s_q8ple_256k.sh)（从 512K 版派生，只改 8 处：`CTX` / `ROPE_SCALING` / `ROPE_SCALE` / run 名 / json 名 / `CONV_CACHE_MIB` / `CONV_CACHE_SLOTS` / echo 文案），
+  json 快照 [example-strata-davidau-iq3_s-q8ple-256k.json](example-strata-davidau-iq3_s-q8ple-256k.json)。**开机单元 drop-in 已指这份脚本**（2026-10-22，`~/.config/systemd/user/strata-swift.service.d/override.conf`）。
+
+#### 0.2.2 + DavidAU IQ3_S + 无 YaRN @ 256K（**当前在用**；停放 5 槽 / 20480 MiB，`PREFILL=16384`，`layer_split 26`，单流；bench 2026-10-22 09:39，[results/davidau_iq3_256k.json](results/davidau_iq3_256k.json)）
+
+* **model**：https://huggingface.co/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/tree/main
+  （GSQ-RCO abliterated IQ3_S：分片1 `55063664928` + 分片2 `28800138432` + `mmproj-Qwen3.8-Flash-Next-BF16.gguf` `907543008`；本机 `~/models/DavidAU/…/`，`--native` 指分片1）
+* **ngram（PLE，外挂 Q8_0，替换原生 IQ4_NL shard 2）**：还是那一个 https://huggingface.co/sleepyeldrazi/Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-GGUF/tree/main
+  （51 G；本机 `~/models/sleepyeldrazi/…-00002-of-00002.gguf`，`--ple-gguf`。换 ctx 不用重下，也不换表；「shard 2 即使被 PLE 顶替也必须落盘」的原因见 0.1.45 那节，0.2.2 行为不变）
+* **script**：[launch_davidau_iq3s_q8ple_256k.sh](launch_davidau_iq3s_q8ple_256k.sh)（启动器）· [example-strata-davidau-iq3_s-q8ple-256k.json](example-strata-davidau-iq3_s-q8ple-256k.json)（live json 快照）
+  · [scripts/decode_ctx_tps.py](scripts/decode_ctx_tps.py)（本轮跑的 bench）· [results/davidau_iq3_256k.json](results/davidau_iq3_256k.json)（原始数据）
+
+```
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    97.8    95.6    88.3    88.3   102.4    96.5   122.5    98.0    98.9    98.1    98.6  |       4.9     0.08      1625
+   32k    94.1    92.5    81.7    93.2    96.6    93.8   116.6    99.3   104.4    91.1    96.3  |      14.9     0.25      2110
+   64k    93.2    88.2    92.6    92.5   104.6    89.6    96.5    91.6    97.1    94.4    94.0  |      21.9     0.36      2863
+  128k    85.3    91.6    70.0    90.6   102.9    92.3   112.2   101.9    86.3    80.3    91.3  |      39.8     0.66      3144
+  200k    87.0    93.3    75.1    84.5    97.6    88.1    93.6    99.6    99.2    85.9    90.4  |      60.8     1.01      3212
+  256k    98.0    96.5    88.2    91.0    97.0    92.0   119.3    98.7    94.3    92.4    96.7  |      78.1     1.30      3195
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    92.6    93.0    82.6    90.0   100.2    92.0   110.1    98.2    96.7    90.4    94.6
+saved /home/xi/ubuntu_handoff/results/davidau_iq3_256k.json
+```
+
+- **decode AVG 94.6 = 本机历史最高**。同 ctx 对 0.1.43.1 的 256K 基线（[results/43_1_patch_1.json](results/43_1_patch_1.json)，AVG 85.0）**+11.3%**，
+  256k 单档 81.8 → **96.7（+18.2%）**、200k 81.0 → 90.4、128k 85.4 → 91.3，**六档全涨**。
+  跨 ctx 对 0.1.45 + YaRN×2 @512K 那版（AVG 79.7）是 **+18.7%**，但那一段里同时换了引擎、拆了 YaRN、上下文减半，不能全记在版本头上。
+  口径要说清：43.1 基线是 **Swift IQ3_S + `PREFILL=8192`**，本轮是 **DavidAU IQ3_S + `PREFILL=16384`**，三件事一起动；要单拆版本收益得同模型重跑。
+- **prefill**：256K 冷读 **78.1 s**（43.1 同 ctx 85.6 s，**-8.8%**；0.1.45 @512K 是 172.0 s），峰值 **3212 t/s @200k**、128k 3144、256k 3195。
+  **8k/32k 两档 pre_tps 要留问号**：1625 / 2110 vs 基线 1608 / 2548，32k 反而慢 17%，这两档是引擎起来后第一批跑的（专家热层 / expert-profile 没热），0.1.45 那轮同现象；要准就重跑这两档。
+- **停放 5 槽配不满**：`--conversation-cache-mib 20480 --conversation-cache-slots 5`，但 256K 每条约 **3.9 G**，64 G 物理 RAM 上常驻专家已吃 **32.48 GiB**，实测只停得住 4 条。
+  引擎逐字日志：`conversation cache: skip parking (physical RAM admission; need 3754 MiB plus 2560 MiB floor, 4278 MiB available, source meminfo; evicted 4, 0 still parked)`，
+  另有 `parked=4 bytes=15743201872 evictions=56`。→ 第 5 槽会 LRU 驱逐，稳态按 **4 条**算；要 5 条稳态就 `CONV_CACHE_SLOTS=4` 或加 RAM。
+- **温度**：json 里 `sampling` = `1.0 / 0.95 / 20` + `force: true`（= 模型页 / Strata 内置卡片的 thinking 档；instruct 档是 `0.7 / 0.8 / 20 + presence_penalty 1.5`）。
+  4090 那台钉死 0.9，本机这版**没钉**（客户端传什么就用什么）。`effort_position: "end"` 由 serve 翻成 `--tail-role-token 8678`，json 的 `args` 里看不到它，属正常。
+- 口径：`tg=256`、`runs=1`、`exact_tg`、`flush_per_tier`、`enable_thinking=false`，`n_ctx=262144`、`model_name=qwen-flash-next`；各档 prompt token 8k 7912 / 32k 31352 / 64k 62606 / 128k 125125 / 200k 195454 / 256k 249668，
+  与 43.1 基线那轮逐档差 <0.5%，可直接比。
+
+### Strata 0.1.45（2026-10-18 官方源码编译 sm_86，只带 #1233 PLE 补丁；2026-10-21 已被 0.2.2 取代）
 
 * **换法**：gh-proxy 拉 `v0.1.45.zip` 解到 `~/src/Strata-0.1.45` → **只打** `patches/ple-only-native-dense-v0.1.43.1.patch`（0.1.45 仍未修 #1233，不打启动即崩）
   → `cmake -G Ninja -DSTRATA_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=~/venvs/sglang-0519/…/cu13/bin/nvcc`
@@ -26,7 +80,7 @@ ctx 524288 + YaRN×2、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=8192`、�
 * **script**：仍是 `launch_swift_abliterated_iq3s_q8ple_512k.sh`（ctx 524288 + YaRN×2 + 槽 3 / 池 14 + `PREFILL=8192`，单流 `total_slots=1`）。
 * **回滚**：`systemctl --user stop strata-swift && mv -f ~/src/Strata/engine/strata.bak-0.1.44.1p ~/src/Strata/engine/strata && mv -f ~/src/Strata/engine/strata-vision.bak-0.1.44.1p ~/src/Strata/engine/strata-vision && systemctl --user start strata-swift`。
 
-#### 0.1.45 + DavidAU IQ3_S + YaRN×2 @ 512K（**当前在用**；换模型不换引擎，bench 2026-10-20 14:03，`results/davidau_iq3.json`）
+#### 0.1.45 + DavidAU IQ3_S + YaRN×2 @ 512K（换模型不换引擎，bench 2026-10-20 14:03，`results/davidau_iq3.json`；已被 0.2.2 @256K 取代）
 
 * **model**：https://huggingface.co/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/tree/main
   （GSQ-RCO abliterated IQ3_S：分片1 `55063664928` + 分片2 `28800138432` + `mmproj-Qwen3.8-Flash-Next-BF16.gguf` `907543008`；本机 `~/models/DavidAU/…/`，`--native` 指分片1）
@@ -61,7 +115,7 @@ ctx 524288 + YaRN×2、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=8192`、�
    AVG      78.3    79.2    69.5    75.7    82.8    73.9    98.5    82.0    80.4    76.7    79.7
 ```
 
-- **decode 全面高于同机 Swift 版**：AVG **75.3 → 79.7（+5.9%）**；64k +12.4%、256k +7.8%、384k +6.5%、200k +5.6%、512k 持平（72.2）。这是本机目前最高的一版。
+- **decode 全面高于同机 Swift 版**：AVG **75.3 → 79.7（+5.9%）**；64k +12.4%、256k +7.8%、384k +6.5%、200k +5.6%、512k 持平（72.2）。这是当时本机最高的一版（0.2.2 @256K 已到 94.6，见上）。
 - **prefill**：512K 冷读 **190.7 s → 172.0 s（-9.8%，2906 t/s）**；64k 以上 +1.4~+10.8%。
   **但 8k/32k 反而慢**（1543→1188、2432→2012）：这两档是引擎重启后第一批跑的，专家热层 / expert-profile 还没热，别当结论；要准就重跑一轮。
 - 口径：同机同引擎同 ctx 同 `PREFILL=8192` 同单流，只差 model + pack + n-gram 来源；两轮 prompt token 数几乎一致（512k 档 499721 vs 500187），`tg=256`、`runs=1`、`flush_per_tier`、thinking off。
@@ -515,9 +569,12 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `scripts/needle_512k.py` | **512K NIAH 埋点**：5 针 × 5 深度，单请求，严格 `KEY=<code>` 判分（复用 decode_bench 原语） |
 | `launch_swift_abliterated_iq3s_q8ple.sh` | 256K IQ3_S+PLE 启动器（单流订死；JSON_ONLY=1 只写 json 不启动） |
 | `launch_swift_abliterated_iq3s_q8ple_512k.sh` | 512K 启动器（Swift 版，历史）：ctx 524288 + yarn×2 + 旗杆 `6×16384` + 停放 `16384/3/4096/2560`，`PROMPT_CACHE_TAIL` 默认 0 |
-| `launch_davidau_iq3s_q8ple_512k.sh` | **当前开机在用**：DavidAU IQ3_S + Q8_0 PLE 的 512K 启动器（换模型版，参数同上那行） |
-| `example-strata-davidau-iq3_s-q8ple.json` | DavidAU live json 快照（2026-10-20，含 `effort_position: "end"`） |
-| `results/davidau_iq3.json` | **DavidAU 八档十类原始数据（2026-10-20，decode AVG 79.7 / 512k 冷读 172.0 s）** |
+| `launch_davidau_iq3s_q8ple_256k.sh` | **当前开机在用（0.2.2 @256K）**：DavidAU IQ3_S + Q8_0 PLE，ctx 262144 无 YaRN、`PREFILL=16384`、停放 `20480/5`、旗杆 `6×16384` |
+| `example-strata-davidau-iq3_s-q8ple-256k.json` | 上面那份的 live json 快照（2026-10-22，含 `effort_position: "end"`） |
+| `results/davidau_iq3_256k.json` | **0.2.2 @256K 六档十类原始数据（2026-10-22，decode AVG 94.6 / 256k 冷读 78.1 s）** |
+| `launch_davidau_iq3s_q8ple_512k.sh` | DavidAU 512K 启动器（0.1.45 时代的开机在用，YaRN×2） |
+| `example-strata-davidau-iq3_s-q8ple.json` | 512K live json 快照（2026-10-20，含 `effort_position: "end"`） |
+| `results/davidau_iq3.json` | DavidAU 八档十类原始数据（2026-10-20，decode AVG 79.7 / 512k 冷读 172.0 s） |
 | `launch_swift_abliterated_iq3s_q8ple_multi.sh` | multi-slot 入口（PARALLEL / BATCH_MODE=draft|pipe） |
 | `systemd/strata-swift.service` | user unit；ExecStart=256K 启动器；**unit env 才是 PARALLEL/CONV_* 杠杆** |
 | `patches/ple-only-native-dense-v0.1.43.1.patch` | #1233 外挂 PLE 启动修复（**必打**；44.1 树原样可打） |
