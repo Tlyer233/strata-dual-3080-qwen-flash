@@ -2,13 +2,18 @@
 
 Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This file is for an agent, not a human. Paths below are the reference PC unless remapped.
 
-**当前状态（2026-10-22）**：引擎已升到 **Strata 0.2.2**（官方 tag `v0.2.2` 源码编译 sm_86，仍只带 #1233 PLE 补丁；
-**该 tag 的 `CMakeLists.txt` 里 `project(strata VERSION 0.1.47)`，所以 `strata --version` 打的是 0.1.47**，认版本看源码树，见「Strata 0.2.2」一节），
-模型仍是 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，n-gram 仍用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/rt`；
-**ctx 从 524288 + YaRN×2 换成 262144 无 YaRN**（256K 是模型原生训练 ctx，不用外推）、双卡 `gpus 1,0` + `layer_split 26`、`PREFILL=16384`、单流、vision gpu、`effort_position: "end"`。
-实测 decode AVG **94.6**（8k→256k 六档十类，`results/davidau_iq3_256k.json`），256K 冷读 **78.1 s / 3195 t/s**；
-同 ctx 的 0.1.43.1 基线是 85.0 / 85.6 s，512K 那版（0.1.45 + YaRN×2）是 79.7 / 172.0 s。
-开机默认 = `launch_davidau_iq3s_q8ple_256k.sh`（`~/.config/systemd/user/strata-swift.service.d/override.conf` 的 ExecStart，2026-10-22 改的）。
+**当前状态（2026-10-22 晚）**：两台（3080 双卡、4090 单卡）都跑 **Strata v0.2.2 + 512K**，版本只剩这一套（旧的 0.1.4x 树全部进 `~/src/old/`）。
+引擎 = 官方 tag `v0.2.2` 源码编译；**该 tag 的 `CMakeLists.txt` 写的是 `project(strata VERSION 0.1.47)`，所以 `strata --version` 打 0.1.47**，
+认版本要看源码树 + sha256（见「Strata 0.2.2」一节）。跑法：ctx 524288 + `--rope-scaling yarn --rope-scale 2`、k8v4、`--resident-experts`、
+`--pipeline-windows 2`、单流、vision gpu、`effort_position: "end"`、旗杆 `6×16384`，tail / spread 都没开。
+模型仍是 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，n-gram 仍用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/rt`。
+引擎补丁两个：**#1233 PLE（不打启动即崩）** 和 **same-chat rewind（Codex 插话不再占停放槽，见「same-chat rewind」一节）**；
+serve 也一并升到 0.2.2，并把「钉 sampling」补丁搬过去（`patches/port_pin_022.py`，v0.2.2 的锚点和 0.1.38/0.1.45 那份不一样）。
+停放：3080 `--conversation-cache-mib 24576 / slots 2`，4090 `24576 / slots 4`，两边 `min-tokens 18432`、`min-free 2560`。
+温度：4090 钉死 `0.9 / 0.95 / 20`（json 顶层 `sampling` + `sampling_force`，客户端传什么都压不过）；3080 的 json 没这两键 → 不钉。
+开机：3080 = drop-in `~/.config/systemd/user/strata-swift.service.d/override.conf` 指 `launch_davidau_iq3s_q8ple_512k.sh`；4090 = user unit 本体同一份脚本。
+本轮 512K 的 decode / prefill 数还没重测；**0.2.2 上已测的是 256K 那轮**（decode AVG 94.6、256K 冷读 78.1 s / 3195 t/s，
+`results/davidau_iq3_256k.json`，同 ctx 的 0.1.43.1 基线 85.0 / 85.6 s），口径写在下面 0.2.2 那节里。
 
 **IQ3_XXS** (`launch_swift_iq3xxs.sh`): full RAM arena, ~70–80 tok/s decode on this box. Quant fits 64 GB.
 
@@ -17,22 +22,80 @@ Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This fi
 
 ## 版本实测（按引擎版本；每版本 = model / ngram / script / 该版本实测表）
 
-### Strata 0.2.2（当前在用；2026-10-21 官方 tag `v0.2.2` 源码编译 sm_86，只带 #1233 PLE 补丁）
+### Strata 0.2.2（当前在用；2026-10-21 起官方 tag `v0.2.2` 源码编译，带 #1233 PLE + same-chat rewind 两个引擎补丁）
 
 * **版本命名坑（先说，别对着 `--version` 找 0.2.2）**：官方 tag `v0.2.2` 的 `CMakeLists.txt:11` 还是 `project(strata VERSION 0.1.47)`，
   `STRATA_VERSION` 取 `PROJECT_VERSION` → `strata --version` 打 **0.1.47**；`engine/BUILD.json` 里甚至是上一版留下的 `"version": "0.1.45"`
-  （换二进制时 `src=skip`，那个文件没重写）。认版本的可靠办法：比对源码树 + sha256。本机在线的两个二进制逐字等于 0.2.2 树的产物
-  （`engine/strata` = `~/src/Strata-0.2.2/build/strata`，`60d11fc4…`；`engine/strata-vision` = `build-vision/bin/strata-vision`，`6ffc8eac…`）。
+  （换二进制时 `src=skip`，那个文件没重写）。认版本的可靠办法：比对源码树 + sha256，或者看引擎日志里最后一次 `engine started` 之后那行
+  `session is up (engine 0.1.47)`（**重启判健康也别只看 `/v1/models` 的 `n_ctx`：换 ctx 之前那个数就已经在那儿了**）。
+  2026-10-22 21:2x 两台在线二进制（都已含 same-chat rewind）：3080 `engine/strata` = `~/src/Strata-0.2.2/build/strata` = `bf5b11c5640a…`，
+  `engine/strata-vision` = `build-vision/bin/strata-vision` = `6ffc8eac7459…`；4090 `engine/strata` = 它那棵 0.2.2 树的 `build/strata` = `4e9dc7daa1f2…`。
 * **换法**：`v0.2.2.zip` 走 gh-proxy 解到 `~/src/Strata-0.2.2` → **`patches/ple-only-native-dense-v0.1.43.1.patch` 还得打**（0.2.2 依旧没修 #1233，不打启动即崩
   `duplicate split shard number`），但**行号已挪**：补丁 hunk 头是 `generate.cpp` 第 2551 行，0.2.2 树里 `ple_only` 那段在 3225 行，直接 `patch` 会拒，按 `ple_only` 逐字贴进去即可
   → `cmake -G Ninja -DSTRATA_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 …` → `ninja` 出 `strata` + `build-vision`（先 unlink 再拷，运行中的 inode 会「文本文件忙」）。
-  本机冷启到可对话 **约 2 分钟**（256K 无 YaRN；日志逐字：`FileExpertSource: mapped pinned cache complement ready: resident 32.48 GiB, pinned 32.48 GiB in 56 s`，
-  光 page-locked 常驻专家层就 56 s。0.1.45 @512K 那版模型加载是 235 s，ctx 减半 + 不用 YaRN 后快一半）。
-* **换 ctx 不换模型**：256K = 模型原生训练 ctx，所以 `--rope-scaling none --rope-scale 1`，**YaRN×2 撤掉**；`PREFILL` 8192 → **16384**；停放 `16384/3` → **`20480/5`**；旗杆仍 `6×16384`。
+  同一个 0.2.2 树还要打 **same-chat rewind**（在 #1233 之后、重编之前）：
+  `python3 -c "import pathlib,importlib.util as iu;s=iu.spec_from_file_location('al','patches/apply_local.py');m=iu.module_from_spec(s);s.loader.exec_module(m);m.apply_same_chat_rewind(pathlib.Path.home()/'src/Strata-0.2.2')"`
+  → 打印 `patched generate.cpp: same-chat rewind`，`grep -c same_chat_rewind src/program/generate.cpp` 应为 4。
+  今天没跑整份 `apply_local.py`：它开头还要改 `setup.py` 和 0.1.38 时代的 serve 锚点，跟已经钉过 sampling 的 0.2.2 serve 会撞，所以只单独调这一个函数（两个锚点 `if (borrow && !pin_sibling && park_worth) {` 和那个 `} else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth &&` 在 0.2.2 里各恰好 1 处，函数会自己核对）。
+  之后 `cmake --build build --target strata -j $(nproc)` 增量重编（只改 `generate.cpp`：3080 16 核约 3 分钟，4090 18 核约 2 分钟）。
+* **换 serve 的坑（2026-10-22 本机真踩过）**：v0.2.2 把进程看护从 `serve/` 拆成**树根的 `strata_control` 包**，`serve/server.py:6224` 还要延迟 `import strata_cli.client`。
+  只把 `serve/` 拷进运行目录、或把运行目录里"看着不像运行用"的东西搬走，就会 `ModuleNotFoundError: No module named 'strata_control'`，8005 直接没人听（而且启动脚本已经把旧引擎停了，两头空）。
+  搬法：`ln -s ../Strata-0.2.2/strata_control` 和 `ln -s ../Strata-0.2.2/strata_cli` 到运行目录，然后
+  `cd <运行目录> && .venv/bin/python -c "import serve.server, strata_cli.client"` **必须 rc=0** 才算完（`import serve.server` 单跑不算数，看护那个 import 在函数里，跑得起来才炸）。
+  钉 sampling 那份补丁在 v0.2.2 上锚点全变了，用 `patches/port_pin_022.py`（幂等，四个锚点各必须恰好 1 处，对不上就拒绝动手；`python3 patches/port_pin_022.py` 打印 `patched … py_compile 过`，再跑一遍打印 `skip …`）。
+* **冷启到可对话的耗时**：256K 无 YaRN 约 **2 分钟**（日志逐字：`FileExpertSource: mapped pinned cache complement ready: resident 32.48 GiB, pinned 32.48 GiB in 56 s`，
+  光 page-locked 常驻专家层就 56 s）；512K + YaRN×2 双卡 3080 实测 **120-128 s**、单卡 4090 **36 s**（模型页还在 page cache 时）。0.1.45 @512K 那版模型加载是 235 s。
+* **现在两台都跑 512K**（2026-10-22 晚切回）：`launch_davidau_iq3s_q8ple_512k.sh`，ctx 524288 + `--rope-scaling yarn --rope-scale 2`、k8v4、`--resident-experts`、`--pipeline-windows 2`、单流、vision gpu。
+  `PREFILL` 4090 **32768**（单卡 sm_89）、3080 **16384**（双卡 `gpus 1,0` + `layer_split 26`）；停放两边 `--conversation-cache-mib 24576`、`min-tokens 18432`、`min-free 2560`，槽 **4090 = 4 / 3080 = 2**（3080 定 2 的理由见「same-chat rewind」那节的停放实测）；旗杆仍 `6×16384`，tail / spread 都没开。
+  256K 那版（ctx 262144、`--rope-scaling none`、停放 `20480/5`）是同一条模型的另一种切法，脚本还在：`launch_davidau_iq3s_q8ple_256k.sh`，实测表在下一节。
 * **script**：[launch_davidau_iq3s_q8ple_256k.sh](launch_davidau_iq3s_q8ple_256k.sh)（从 512K 版派生，只改 8 处：`CTX` / `ROPE_SCALING` / `ROPE_SCALE` / run 名 / json 名 / `CONV_CACHE_MIB` / `CONV_CACHE_SLOTS` / echo 文案），
-  json 快照 [example-strata-davidau-iq3_s-q8ple-256k.json](example-strata-davidau-iq3_s-q8ple-256k.json)。**开机单元 drop-in 已指这份脚本**（2026-10-22，`~/.config/systemd/user/strata-swift.service.d/override.conf`）。
+  json 快照 [example-strata-davidau-iq3_s-q8ple-256k.json](example-strata-davidau-iq3_s-q8ple-256k.json)。开机单元已改指 **512K** 那份（2026-10-22 晚：3080 是 drop-in `~/.config/systemd/user/strata-swift.service.d/override.conf`，4090 是 user unit `strata-swift.service` 本体）。
 
-#### 0.2.2 + DavidAU IQ3_S + 无 YaRN @ 256K（**当前在用**；停放 5 槽 / 20480 MiB，`PREFILL=16384`，`layer_split 26`，单流；bench 2026-10-22 09:39，[results/davidau_iq3_256k.json](results/davidau_iq3_256k.json)）
+#### same-chat rewind：Codex 插话不再占停放槽（2026-10-22，两台在线都有）
+
+**问题**（今天 4090 日志逐字，补丁前）：一条 16 万 token 的会话，插话那一次 `prompt 162841 tokens = 0 reused + 162841 read in 33647 ms`，
+紧接着 `conversation cache: parked 162256 tokens … parked=1 bytes=2839379148`，再插一次就 `parked=2`。**每插一次话就多停一条僵尸会话**，
+5 槽很快被这些 fork 占满（4090 那份引擎 log 第 1911 行已见 `evictions=2`）。停一条 452K 的快照实测 6.00 GiB（`snapshot_bytes=6445805784`），500K 是 6.57 GiB（`7053600632`），
+约 **13.9-15.7 KB/token**（旧记录里 18.5-35 KB/token 是 0.1.45 时代 ctx 524288 + 池 14 那版，别混用）。
+
+**补丁**：`patches/apply_local.py` 里的 `apply_same_chat_rewind()`，打 `src/program/generate.cpp` 的停放判定。判据逐字：
+`!from_live && !incoming && slot_source < 0 && resume > 0 && !checks.empty()`，且 `resume` 恰好等于本链某个 checkpoint 的长度、且 `resume > checks.front().ids.size()`（链根）
+→ 这是**同一条会话回退**（Codex 插话：掐断当前请求、丢掉助手半截、接在上一句完整话后面重发），不是新会话，于是跳过 park 并打一行
+`conversation cache: same-chat rewind at N (root R); not parking`；另一处 else 分支加 `!same_chat_rewind`。别的会话照旧 park，借停放快照那条路径没动。
+
+**实测（3080，v0.2.2+该补丁，2026-10-22 21:2x）**
+
+```
+1) 建会话     prompt=56546  cached=0      重读=56546  wall=26.3s
+2) 退一步     prompt=51751  cached=49152  重读=2599   wall=3.15s
+   conversation cache: same-chat rewind at 49152 (root 16384); not parking
+   conversation cache: skip parking (15172 tokens, below the 18432 minimum; parked=2)
+```
+
+退一步命中的是 49152 那根旗杆（`every=16384`），重读 2599 token / 3.15 s，**停放计数没涨**。4090 那边 19:18-21:0x 这段真跑了 4 次，逐字
+`same-chat rewind at 29157 (root 26129); not parking`、`same-chat rewind at 264305 (root 18684); not parking`；3080 那台同期 8 次。
+
+**配套的门槛**：`--conversation-cache-min-tokens` 4096 → **18432**（`launch_davidau_iq3s_q8ple_512k.sh` 里注释写清了理由：完整工具表的链根约 18684 仍占格，
+`get_goal` 那种 ~15k 的短工具表不占格）。同一条会话的插话不靠这条门槛，靠上面的 same-chat rewind。
+
+**停放能停几条（3080 62 G、常驻专家 32.48 GiB，2026-10-22 实测）**
+
+```
+预算 24576 / 槽 2      MemAvailable     SwapFree     结果
+------------------------------------------------------------------------------
+停 1 条 (452K)          14.8 GiB        0.1 GiB     park 3.8 s，OK
+停 2 条 (452K x2)        8.8 GiB        0.0 GiB     park 4.5 s，OK（parked 共 14.24 GiB）
+想停第 3 条              3.6 GiB        0.0 GiB     门槛要 6.0 GiB + 2560 MiB floor -> 不给，
+                                                    且第 3 条的 prefill 从 153 s 拖到 >170 s（整机在抖）
+```
+
+所以 3080 定 `slots 2`（留 3 槽只会让第 3 条 park 把 swap 顶满、整机抖，然后马上被 LRU 逐出）；4090 停 4 槽但同样受 RAM 门槛约束。
+停放命中时回访是秒回，逐字：`conversation cache: restored 451864 tokens (checkpoint) in 651.0 ms`，整次切换 wall **1.06 s**（重读 5 token）；
+A↔B 交替 3 轮 6 次数都在 **1.34-1.58 s**，重读 23 token。对照新建一条 452K = **153.0 s**（2953 t/s），差 100-150 倍。
+
+#### 0.2.2 + DavidAU IQ3_S + 无 YaRN @ 256K（已被 512K 取代；停放 5 槽 / 20480 MiB，`PREFILL=16384`，`layer_split 26`，单流；bench 2026-10-22 09:39，[results/davidau_iq3_256k.json](results/davidau_iq3_256k.json)）
+
+（**已被 512K 取代**，见开头「当前状态」；这轮是 0.2.2 上目前唯一测过的 sweep，保留做版本口径。）
 
 * **model**：https://huggingface.co/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/tree/main
   （GSQ-RCO abliterated IQ3_S：分片1 `55063664928` + 分片2 `28800138432` + `mmproj-Qwen3.8-Flash-Next-BF16.gguf` `907543008`；本机 `~/models/DavidAU/…/`，`--native` 指分片1）
@@ -197,7 +260,7 @@ saved /home/xi/ubuntu_handoff/results/davidau_iq3_256k.json
 
 #### 双卡 `--prompt-cache-tail`（Codex 插话尾部分叉；2026-10-18，`results/prompt_cache_tail_split_20261018.txt`）
 
-上游 `--prompt-cache-tail` 只给单卡（`generate.cpp` `!multi_gpu`，0.1.45 仍是）。Codex 插话 = 掐断当前请求、丢掉助手半截、把新句子接在上一句完整话后面重发 → 尾部分叉，不是追加。`--prompt-cache-every 131072` 下分叉最多回退 128K。本机补丁：去掉该限制，layer-split 各 stage 在尾巴 chunk 也存 part。启动器默认 `PROMPT_CACHE_TAIL=1`。打法：`patch -p1 -i patches/prompt-cache-tail-layer-split.patch`（Strata 根）。本次测在本机源码重编后的引擎上（boot 日志 `session is up (engine 0.1.44.1)`），512K launcher，`PREFILL=8192`。
+上游 `--prompt-cache-tail` 只给单卡（`generate.cpp` `!multi_gpu`，0.1.45 仍是，**v0.2.2 也仍是**，2026-10-22 复核：`src/program/generate.cpp:9771` 那个条件里还写着 `!multi_gpu`）。Codex 插话 = 掐断当前请求、丢掉助手半截、把新句子接在上一句完整话后面重发 → 尾部分叉，不是追加。`--prompt-cache-every 131072` 下分叉最多回退 128K。本机补丁：去掉该限制，layer-split 各 stage 在尾巴 chunk 也存 part。启动器默认 `PROMPT_CACHE_TAIL=1`。打法（该文件已从工作树删除，只剩 git 历史）：`git show 16c3762:patches/prompt-cache-tail-layer-split.patch > /tmp/tail.patch && patch -p1 -i /tmp/tail.patch`（Strata 根）。本次测在本机源码重编后的引擎上（boot 日志 `session is up (engine 0.1.44.1)`），512K launcher，`PREFILL=8192`。**插话这条线现在的有效解法是 same-chat rewind（见上面那节），tail 已不用。**
 
 ```
   run                      prompt  reused     read  wall_s  note
@@ -408,6 +471,7 @@ force=true
 ```
 
 Stock Strata **ignores** unknown key `force`. Apply `patches/apply_local.py` so `serve/server.py` honors it (`svc.sampling_force`). Without the patch, clients (Open WebUI, speedtest) overwrite temp/top_p.
+On **v0.2.2** the serve code moved and those anchors no longer match: use `patches/port_pin_022.py` (same pin, 0.2.2's anchors; json keys are top-level `sampling` + a `sampling_force` list).
 
 Adaptive MTP knobs (written by `apply_adaptive_mtp.py` into json before start):
 
@@ -554,7 +618,8 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `scripts/download_swift15_flash_gsq_iq3.sh` | IQ3 GGUF+mmproj |
 | `scripts/download_swift15_flash_iq4xs.sh` | IQ4 GGUF shards |
 | `scripts/print_expert_counts.py` | parse last loaded chunk in log |
-| `patches/apply_local.py` | STRATA_SKIP_BUILD + sampling.force + resident-on-split |
+| `patches/apply_local.py` | STRATA_SKIP_BUILD + sampling.force + resident-on-split；v0.2.2 起还提供 `apply_same_chat_rewind`（插话不占停放槽的引擎补丁） |
+| `patches/port_pin_022.py` | 把「钉 sampling」补丁搬到 v0.2.2 的 `serve/server.py`（4 个精确锚点、幂等、py_compile 自检） |
 | `patches/resident-on-split-v0.1.38.patch` | dual-GPU GPU-then-RAM (see RESIDENT_ON_SPLIT.md) |
 | `RESIDENT_ON_SPLIT.md` | method + Strata issues/PRs |
 | `tokenizer/chat_template.jinja` | Swift pack template, default xhigh |
@@ -578,7 +643,7 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `launch_swift_abliterated_iq3s_q8ple_multi.sh` | multi-slot 入口（PARALLEL / BATCH_MODE=draft|pipe） |
 | `systemd/strata-swift.service` | user unit；ExecStart=256K 启动器；**unit env 才是 PARALLEL/CONV_* 杠杆** |
 | `patches/ple-only-native-dense-v0.1.43.1.patch` | #1233 外挂 PLE 启动修复（**必打**；44.1 树原样可打） |
-| `patches/prompt-cache-tail-layer-split.patch` | 双卡 `--prompt-cache-tail`（上游 `!multi_gpu`；Codex 插话尾部分叉） |
+| `patches/prompt-cache-tail-layer-split.patch` | 已从工作树删除（`459f0c6`），存档在 git 历史 `16c3762`；双卡 `--prompt-cache-tail`，现由 same-chat rewind 取代 |
 | `results/prompt_cache_tail_split_20261018.txt` | 2026-10-18 同前缀分叉：B 16384 reused / 5.0 s vs A 0 reused / 11.5 s |
 | `results/43_1_patch_1.json` | 256K 基线原始数据（43.1+PREFILL 8192） |
 | `results/44_1_1.json` / `results/iq3_4096_1024reserve.json` | 44.1 全量（回滚依据）/ 43.0 对照 |
