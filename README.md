@@ -95,7 +95,7 @@ saved /home/xi/ubuntu_handoff/results/davidau_iq3_256k.json
 * **pack**：`tools/iq_pack.py --gguf <shard1> --out ~/src/Strata-data/packs/davidau-gsq-rco-iq3_s` → `dense.bin` 1538035200 + `tokenizer/chat_template.jinja`（从 GGUF 导出，与模型页 / Strata 内置卡片一致）。
 * **MTP**：沿用 `~/src/Strata-data/mtp/rt`（Swift 官方 `mtp.*` → q2_0），换模型不用重打。
 * **script**：`launch_davidau_iq3s_q8ple_512k.sh` = 512K 启动器的换模型版（`gpus 1,0` + `layer_split 26`、ctx 524288 + yarn×2、k8v4、`PREFILL=8192`、
-  旗杆 `6×16384`、停放 `16384 MiB / 3 槽 / min-tokens 4096 / min-free 2560`、`--resident-experts`、`--pipeline-windows 2`、vision gpu、单流）。
+  旗杆 `6×16384`、停放 `16384 MiB / 3 槽 / min-tokens 18432 / min-free 2560`、`--resident-experts`、`--pipeline-windows 2`、vision gpu、单流）。
   json 快照 `example-strata-davidau-iq3_s-q8ple.json`（含 `effort_position: "end"`）。**开机单元 drop-in 已指这份脚本**（2026-10-20，`~/.config/systemd/user/strata-swift.service.d/override.conf`）。
 * **温度**：不钉。模型页 = Strata 卡片：thinking `1.0 / 0.95 / 20`，instruct `0.7 / 0.8 / 20 + presence_penalty 1.5`。
   本机 `serve/server.py` 不认 `sampling.force`（boot 日志逐字：`config sampling.force=True: unknown key, ignored`），config 里的 1.0/0.95/20 只是默认值，客户端传什么就用什么。
@@ -568,7 +568,7 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `scripts/decode_bench.py` | bench：单次测量（服务端 timings 优先） |
 | `scripts/needle_512k.py` | **512K NIAH 埋点**：5 针 × 5 深度，单请求，严格 `KEY=<code>` 判分（复用 decode_bench 原语） |
 | `launch_swift_abliterated_iq3s_q8ple.sh` | 256K IQ3_S+PLE 启动器（单流订死；JSON_ONLY=1 只写 json 不启动） |
-| `launch_swift_abliterated_iq3s_q8ple_512k.sh` | 512K 启动器（Swift 版，历史）：ctx 524288 + yarn×2 + 旗杆 `6×16384` + 停放 `16384/3/4096/2560`，`PROMPT_CACHE_TAIL` 默认 0 |
+| `launch_swift_abliterated_iq3s_q8ple_512k.sh` | 512K 启动器（Swift 版，历史）：ctx 524288 + yarn×2 + 旗杆 `6×16384` + 停放 `16384/3/18432/2560`，`PROMPT_CACHE_TAIL` 默认 0 |
 | `launch_davidau_iq3s_q8ple_256k.sh` | **当前开机在用（0.2.2 @256K）**：DavidAU IQ3_S + Q8_0 PLE，ctx 262144 无 YaRN、`PREFILL=16384`、停放 `20480/5`、旗杆 `6×16384` |
 | `example-strata-davidau-iq3_s-q8ple-256k.json` | 上面那份的 live json 快照（2026-10-22，含 `effort_position: "end"`） |
 | `results/davidau_iq3_256k.json` | **0.2.2 @256K 六档十类原始数据（2026-10-22，decode AVG 94.6 / 256k 冷读 78.1 s）** |

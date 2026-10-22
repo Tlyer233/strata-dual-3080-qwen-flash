@@ -132,8 +132,49 @@ def main() -> None:
             "sampling.force known key",
         )
 
+    apply_same_chat_rewind(ROOT)
     apply_resident_on_split(ROOT)
     print("ok")
+
+
+def apply_same_chat_rewind(root: pathlib.Path) -> None:
+    """A Codex steer resumes from this chain past the root. Do not park the aborted tail."""
+    gen = root / "src" / "program" / "generate.cpp"
+    if not gen.is_file():
+        sys.exit(f"missing {gen}")
+    text = gen.read_text(encoding="utf-8")
+    if "same_chat_rewind" in text:
+        print("skip generate.cpp: same-chat rewind")
+        return
+    anchor = "            if (borrow && !pin_sibling && park_worth) {"
+    inserted = (
+        "            // Same-chat rewind (a Codex steer): this prompt resumes from the live chain's own\n"
+        "            // checkpoint past the shared root. The live suffix is the aborted tail, so it does\n"
+        "            // not take a park slot. A different chat matches only the root, and still parks.\n"
+        "            // Borrowing another parked conversation is unchanged below.\n"
+        "            bool same_chat_rewind = false;\n"
+        "            if (!from_live && !incoming && slot_source < 0 && resume > 0 && !checks.empty()) {\n"
+        "                const int64_t root = (int64_t) checks.front().ids.size();\n"
+        "                bool resume_on_chain = false;\n"
+        "                for (const ConvCheckpoint& c : checks)\n"
+        "                    if ((int64_t) c.ids.size() == resume) resume_on_chain = true;\n"
+        "                same_chat_rewind = resume_on_chain && resume > root;\n"
+        "            }\n"
+        "            if (same_chat_rewind)\n"
+        "                std::fprintf(stderr, \"strata serve: conversation cache: same-chat rewind at %lld \"\n"
+        "                             \"(root %lld); not parking\\n\",\n"
+        "                             (long long) resume, (long long) checks.front().ids.size());\n"
+        "            if (borrow && !pin_sibling && park_worth) {"
+    )
+    if text.count(anchor) != 1:
+        sys.exit(f"{gen}: expected one borrow/park anchor, found {text.count(anchor)}")
+    text = text.replace(anchor, inserted, 1)
+    old_else = "} else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth &&"
+    new_else = "} else if (!same_chat_rewind && (!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth &&"
+    if text.count(old_else) != 1:
+        sys.exit(f"{gen}: expected one park else-if, found {text.count(old_else)}")
+    gen.write_text(text.replace(old_else, new_else, 1), encoding="utf-8")
+    print("patched generate.cpp: same-chat rewind")
 
 
 def apply_resident_on_split(root: pathlib.Path) -> None:

@@ -86,12 +86,14 @@ fi
 #     every 131072      -> 2-3 个/会话, 5 个占用者要 ~15 个, 池 28 有足够余量  <- 现在
 #   日志里 "N checkpoints" 是写次数不是复用, 所以计数器看着健康.
 #   every 131072 的代价: 回退/分支最多重读 128K token (~55 s); 线性 agent 轮次不受影响.
-# --conversation-cache-min-tokens 4096 (官方 PR #1597): 短请求不再占停放槽把长会话顶掉
+# --conversation-cache-min-tokens 18432 (官方 PR #1597): 短请求不再占停放槽把长会话顶掉
+#   2026-10-22: 门槛从 4096 抬到 18432。完整工具表的链根约 18684，仍占格；
+#   get_goal 短工具表（约 15k）不占格。同一条会话插话不靠这条，靠 same-chat rewind。
 #   (那条实测: 3 条几百 token 的短请求顶掉 19198 token 长会话 -> 41.4 s 重读; 设门槛后 0.3 s, 304x).
 CONV_CACHE_MIB="${CONV_CACHE_MIB:-19456}"
 CONV_CACHE_SLOTS="${CONV_CACHE_SLOTS:-6}"
 CONV_CACHE_MIN_FREE_MIB="${CONV_CACHE_MIN_FREE_MIB:-4096}"
-CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-4096}"
+CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-18432}"
 PROMPT_CACHE_N="${PROMPT_CACHE_N:-28}"
 PROMPT_CACHE_EVERY="${PROMPT_CACHE_EVERY:-131072}"
 CCPY_BIN="$ROOT/.venv/bin/python"

@@ -15,7 +15,7 @@
   "--conversation-cache-min-free-mib",
   "4096",
   "--conversation-cache-min-tokens",
-  "4096",
+  "18432",
   "--prompt-cache",
   "14",
   "--prompt-cache-every",

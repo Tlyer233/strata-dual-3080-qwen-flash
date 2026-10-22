@@ -46,7 +46,7 @@
   "--conversation-cache-slots",
   "3",
   "--conversation-cache-min-tokens",
-  "4096",
+  "18432",
   "--conversation-cache-min-free-mib",
   "2560"
  ],

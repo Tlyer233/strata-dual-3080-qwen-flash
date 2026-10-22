@@ -120,7 +120,9 @@ fi
 #   补丁存档在 sdd3080 仓的 git 历史 (patches/prompt-cache-tail-layer-split.patch, commit 16c3762)。
 # 4090 单卡官方就能开 tail, 那边不受这条限制。
 # 默认 0 = 不往 json 写 --prompt-cache-tail; 官方哪天支持多卡, PROMPT_CACHE_TAIL=1 直接开回来。
-# --conversation-cache-min-tokens 4096 (官方 PR #1597): 短请求不再占停放槽把长会话顶掉
+# --conversation-cache-min-tokens 18432 (官方 PR #1597): 短请求不再占停放槽把长会话顶掉
+#   2026-10-22: 门槛从 4096 抬到 18432。完整工具表的链根约 18684，仍占格；
+#   get_goal 短工具表（约 15k）不占格。同一条会话插话不靠这条，靠 same-chat rewind。
 #   (那条实测: 3 条几百 token 的短请求顶掉 19198 token 长会话 -> 41.4 s 重读; 设门槛后 0.3 s, 304x).
 #
 # --- 2026-10-18 第二轮: 3080 整段重读的真凶是 RAM 闸门, 不是旗杆 ---
@@ -147,7 +149,7 @@ PROMPT_CACHE_N="${PROMPT_CACHE_N:-6}"
 PROMPT_CACHE_EVERY="${PROMPT_CACHE_EVERY:-16384}"
 CONV_CACHE_MIB="${CONV_CACHE_MIB:-16384}"
 CONV_CACHE_SLOTS="${CONV_CACHE_SLOTS:-3}"
-CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-4096}"
+CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-18432}"
 CONV_CACHE_MIN_FREE_MIB="${CONV_CACHE_MIN_FREE_MIB:-2560}"
 CCPY_BIN="$ROOT/.venv/bin/python"
 [ -x "$CCPY_BIN" ] || CCPY_BIN="$(command -v python3)"
