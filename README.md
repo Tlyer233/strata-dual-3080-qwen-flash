@@ -7,8 +7,9 @@ Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This fi
 认版本要看源码树 + sha256（见「Strata 0.2.2」一节）。跑法：ctx 524288 + `--rope-scaling yarn --rope-scale 2`、k8v4、`--resident-experts`、
 `--pipeline-windows 2`、单流、vision gpu、`effort_position: "end"`、旗杆 `6×16384`，tail / spread 都没开。
 模型仍是 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，n-gram 仍用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/rt`。
-引擎补丁两个：**#1233 PLE（不打启动即崩）** 和 **same-chat rewind（Codex 插话不再占停放槽，见「same-chat rewind」一节）**；
+引擎补丁三个：**#1233 PLE（不打启动即崩）**、**same-chat rewind（Codex 插话不再占停放槽，见「same-chat rewind」一节）**、**Codex 旁路请求与同线程替换（2026-10-24，见下面那一节）**。
 serve 也一并升到 0.2.2，并把「钉 sampling」补丁搬过去（`patches/port_pin_022.py`，v0.2.2 的锚点和 0.1.38/0.1.45 那份不一样）。
+2026-10-24 这一轮只改了源码树和运行目录的 `serve/server.py`，**没重编、没重启**（3080 GPU 在跑数据）。在跑的 `engine/strata` 仍是 2026-10-22 那份：有 PLE 和 same-chat rewind，没有 `dropped %zu replaced`。槽数不动，3080 仍是 2。
 停放：3080 `--conversation-cache-mib 24576 / slots 2`，4090 `24576 / slots 4`，两边 `min-tokens 18432`、`min-free 2560`。
 温度：4090 钉死 `0.9 / 0.95 / 20`（json 顶层 `sampling` + `sampling_force`，客户端传什么都压不过）；3080 的 json 没这两键 → 不钉。
 开机：3080 = drop-in `~/.config/systemd/user/strata-swift.service.d/override.conf` 指 `launch_davidau_iq3s_q8ple_512k.sh`；4090 = user unit 本体同一份脚本。
@@ -92,6 +93,42 @@ serve 也一并升到 0.2.2，并把「钉 sampling」补丁搬过去（`patches
 所以 3080 定 `slots 2`（留 3 槽只会让第 3 条 park 把 swap 顶满、整机抖，然后马上被 LRU 逐出）；4090 停 4 槽但同样受 RAM 门槛约束。
 停放命中时回访是秒回，逐字：`conversation cache: restored 451864 tokens (checkpoint) in 651.0 ms`，整次切换 wall **1.06 s**（重读 5 token）；
 A↔B 交替 3 轮 6 次数都在 **1.34-1.58 s**，重读 23 token。对照新建一条 452K = **153.0 s**（2953 t/s），差 100-150 倍。
+
+#### Codex 旁路请求与同线程替换（2026-10-24）
+
+针对 Codex。dsh 不发 `conv=`，也不发 `ckpt=0`，这条对它不发生。3080 槽数保持 **2**，不抄 4090 的 4。`--conversation-cache-min-tokens` 仍是 18432。
+
+same-chat rewind 只盖住「插话的切点正好落在本链某根旗杆上，且比链根深」。compact 把正文换成另一段、subagent 各自一条线程时，旧引擎把它们当成新会话整段停进去。短快照占满槽之后，最老的那条被逐出。
+
+补丁是 `patches/apply_codex_side_request.py`。前提：这棵树已经打过 same-chat rewind。幂等。每个锚点必须恰好 1 处，否则退出，不写文件。半截打过（有的标记在、有的不在）也退出。不编译、不启动。
+
+```bash
+python3 patches/apply_codex_side_request.py ~/src/Strata-0.2.2 ~/src/Strata/serve/server.py
+```
+
+第二个参数是运行目录那份 `serve/server.py`。它和源码树不是同一个文件，两份都要有 `conv=`。只打源码树时不传第二个参数。2026-10-24 本机已经跑过这行：源码树四份都是 skip，运行目录的 `serve/server.py` 打上了。
+
+脚本改这几处：
+
+* `serve/server.py` 的 `sampling_keys`：`strata_conversation` 是字符串、长度 1–128、字符属于 `[A-Za-z0-9._:-]` 时，GEN 行拼 `conv=<id>`。不合规则不拼。`strata_checkpoint is False` 仍拼上游已有的 `ckpt=0`（`#830`），这个含义不改。Python 的 `False` 才拼；缺字段、`true`、`0` 都不拼。
+* `include/strata/core/conversation_cache.hpp`：`SavedConversation` 加 `std::string conv;`，空字符串表示不知道是哪条。不写进磁盘会话文件。`drop_replaced(conv, prompt, images)`：id 为空返回 0；否则丢掉 `conv` 相等、且 `conversation_prefix(live, prompt) != live.ids.size()` 的条目（停放的 token 不是这条新提示词的严格前缀）。正在被借走的 donor（`guard`）不删。
+* `src/program/generate.cpp`：活会话旁加 `live_conv`。解析 GEN 键 `conv=`。`park_current` 里 `put` 之前 `image.conv = live_conv`。`conversations.best` 之前，仅 `req_ckpt && !req_conv.empty()` 时调用 `drop_replaced`，删了就打 `dropped N replaced snapshot(s) (conv ...); parked=`。请求正常结束且 `live_ok` 为真：`live_conv = req_conv`。`ckpt=0` 时 `live_ok` 为假，不改 `live_conv`。取消但保留活会话的那条（`#1620`）同样写 `live_conv`。
+* `src/core/conversation_cache_test.cpp`：同线程的延长留着，换正文丢掉，另一个线程不动，空 id 不丢。
+
+一次 compact 之后槽里有什么：
+
+1. 父对话是活 KV，`live_conv` 是它的 thread id。
+2. compact 请求 `strata_checkpoint=false`，所以是 `ckpt=0`。父对话仍 `live_ok`，按原逻辑停进 1 格，快照带上父对话的 id。这条跑完 `live_ok=false`。
+3. 后面的摘要请求也是旁路：`park_current` 看到 `!live_ok`，不入槽。
+4. 压缩后的正式下一轮：同一个 id，提示词不是旧快照的延长。`drop_replaced` 在 `best()` 之前丢掉旧快照。新正文进显存，不新占一格。
+
+一次 subagent 之后槽里有什么：subagent 正文不带 `strata_checkpoint: false`，`conv=` 是子线程自己的 id。第一条到来时父对话停 1 格。再切走时，子线程停进另外 1 格。切回来，新提示词延长那一格里的 token，`drop_replaced` 不删，换回显存。同一个子线程里的 compact、预热、标题仍是旁路，不另占格。
+
+没有 `conv=` 时，旁路仍然不入槽，但第 4 步不会发生，压缩前的快照会留到槽满才被挤走。
+
+插话不靠本补丁。插话没有旁路标记，由 same-chat rewind 在同一条链的检查点上跳过停放。切点没有落在检查点上时，这条对话还会再停一格。那一格不是从 token 0 重读，匹配到的前缀留着，只重读最近旗杆之后的尾巴。
+
+**这次没换二进制。** 3080 GPU 在跑数据，没有 `ninja`，没有覆盖 `~/src/Strata/engine/strata`，没有重启。那份二进制的 mtime 是 2026-10-22 21:20，`strings` 里 `same-chat rewind` 有 1 处，`dropped %zu replaced` 有 0 处。运行目录的 `serve/server.py` 现在会拼 `conv=`；旧引擎跳过不认识的 GEN 键，所以在跑的进程不受影响。GPU 空了之后再增量重编（只动过 `generate.cpp` 和头文件的话，3080 16 核大约 3 分钟），先停掉占用端口的进程再拷贝，运行中的 inode 会「文本文件忙」。`pkill -x strata` 可能杀不掉，进程名有时是 `strata-host`。重编之后日志里才有 `dropped N replaced snapshot (conv <id>); parked=`。
 
 #### 0.2.2 + DavidAU IQ3_S + 无 YaRN @ 256K（已被 512K 取代；停放 5 槽 / 20480 MiB，`PREFILL=16384`，`layer_split 26`，单流；bench 2026-10-22 09:39，[results/davidau_iq3_256k.json](results/davidau_iq3_256k.json)）
 
@@ -619,6 +656,7 @@ Remap `STRATA_ROOT`, `GGUF_DIR`, `CUDA_PIP`, `NVCC`, `STRATA_DATA` if not this P
 | `scripts/download_swift15_flash_iq4xs.sh` | IQ4 GGUF shards |
 | `scripts/print_expert_counts.py` | parse last loaded chunk in log |
 | `patches/apply_local.py` | STRATA_SKIP_BUILD + sampling.force + resident-on-split；v0.2.2 起还提供 `apply_same_chat_rewind`（插话不占停放槽的引擎补丁） |
+| `patches/apply_codex_side_request.py` | 2026-10-24 Codex 旁路 / 同线程替换：`conv=` + `drop_replaced`。幂等，不编译。运行目录的 `serve/server.py` 作第二个参数 |
 | `patches/port_pin_022.py` | 把「钉 sampling」补丁搬到 v0.2.2 的 `serve/server.py`（4 个精确锚点、幂等、py_compile 自检） |
 | `patches/resident-on-split-v0.1.38.patch` | dual-GPU GPU-then-RAM (see RESIDENT_ON_SPLIT.md) |
 | `RESIDENT_ON_SPLIT.md` | method + Strata issues/PRs |
