@@ -2,19 +2,16 @@
 
 Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This file is for an agent, not a human. Paths below are the reference PC unless remapped.
 
-**当前状态（2026-10-22 晚）**：两台（3080 双卡、4090 单卡）都跑 **Strata v0.2.2 + 512K**，版本只剩这一套（旧的 0.1.4x 树全部进 `~/src/old/`）。
-引擎 = 官方 tag `v0.2.2` 源码编译；**该 tag 的 `CMakeLists.txt` 写的是 `project(strata VERSION 0.1.47)`，所以 `strata --version` 打 0.1.47**，
-认版本要看源码树 + sha256（见「Strata 0.2.2」一节）。跑法：ctx 524288 + `--rope-scaling yarn --rope-scale 2`、k8v4、`--resident-experts`、
-`--pipeline-windows 2`、单流、vision gpu、`effort_position: "end"`、旗杆 `6×16384`，tail / spread 都没开。
-模型仍是 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，n-gram 仍用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/rt`。
-引擎补丁三个：**#1233 PLE（不打启动即崩）**、**same-chat rewind（Codex 插话不再占停放槽，见「same-chat rewind」一节）**、**Codex 旁路请求与同线程替换（2026-10-24，见下面那一节）**。
-serve 也一并升到 0.2.2，并把「钉 sampling」补丁搬过去（`patches/port_pin_022.py`，v0.2.2 的锚点和 0.1.38/0.1.45 那份不一样）。
-2026-10-24 这一轮只改了源码树和运行目录的 `serve/server.py`，**没重编、没重启**（3080 GPU 在跑数据）。在跑的 `engine/strata` 仍是 2026-10-22 那份：有 PLE 和 same-chat rewind，没有 `dropped %zu replaced`。槽数不动，3080 仍是 2。
-停放：3080 `--conversation-cache-mib 24576 / slots 2`，4090 `24576 / slots 4`，两边 `min-tokens 18432`、`min-free 2560`。
-温度：4090 钉死 `0.9 / 0.95 / 20`（json 顶层 `sampling` + `sampling_force`，客户端传什么都压不过）；3080 的 json 没这两键 → 不钉。
-开机：3080 = drop-in `~/.config/systemd/user/strata-swift.service.d/override.conf` 指 `launch_davidau_iq3s_q8ple_512k.sh`；4090 = user unit 本体同一份脚本。
-本轮 512K 的 decode / prefill 数还没重测；**0.2.2 上已测的是 256K 那轮**（decode AVG 94.6、256K 冷读 78.1 s / 3195 t/s，
-`results/davidau_iq3_256k.json`，同 ctx 的 0.1.43.1 基线 85.0 / 85.6 s），口径写在下面 0.2.2 那节里。
+**当前状态（2026-10-28）**：**3080 已升到官方 tag `v0.2.7`**（`CMakeLists.txt` 是 `project(strata VERSION 0.1.52)` → `strata --version` 打 **0.1.52**），
+四个本地补丁全部在 0.2.7 上重打（锚点一个没挪，逐字复核见「Strata 0.2.7」一节）；**4090 运行目录仍是 `v0.2.2`（0.1.47）**，现在跑的是 NVFP4-GPTQ 那份 512K
+（`launch_nvfp4_gptq_512k.sh`，模型名仍 `qwen-flash-next`，停放旗杆与 3080 一致），它那个 user unit `strata-swift.service` 目前指 `~/src/Strata-0.2.4/run-deepseek-v4.1-flash-ist-das-2.00bpw.sh`（当前 inactive）。
+两台跑法：ctx 524288 + `--rope-scaling yarn --rope-scale 2`、`--kv k8v4`、`--resident-experts`、`--pipeline-windows 2`、单流、vision gpu、`effort_position: "end"`、旗杆 `6×16384`；
+3080 `--prefill 16384 --layer-split 26`（双卡），4090 `--prefill 32768`（单卡）。模型仍是 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，
+n-gram 用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/rt`。
+停放（2026-10-25 / 10-27 两台一起改成同一套）：`--conversation-cache-mib 24576 --conversation-cache-slots 12 --conversation-cache-min-tokens 18432 --conversation-cache-min-free-mib 2560 --conversation-cache-park-gain 16384`。
+温度：3080 这份 json 有 `sampling`（`1.0/0.95/20`）但**没有**顶层 `sampling_force` 列表 → 钉 sampling 补丁在 3080 上只当默认值、不压请求（`/props` 实测 `default_generation_settings` = `1.0/0.95/20`，与 model card 相同）；
+4090 的 davidau 那份钉 `0.9/0.95/20`，nvfp4 那份两个键都没有 → 走 model card。
+3080 @ 0.2.7 的 8-512K 实测表在下面「Strata 0.2.7」一节：`results/davidau_027_512k.json`，对照的 0.2.5 基线 `results/davidau_025_512k.json`（同机同模型同脚本，只有引擎版本不同）。
 
 **IQ3_XXS** (`launch_swift_iq3xxs.sh`): full RAM arena, ~70–80 tok/s decode on this box. Quant fits 64 GB.
 
@@ -23,7 +20,82 @@ serve 也一并升到 0.2.2，并把「钉 sampling」补丁搬过去（`patches
 
 ## 版本实测（按引擎版本；每版本 = model / ngram / script / 该版本实测表）
 
-### Strata 0.2.2（当前在用；2026-10-21 起官方 tag `v0.2.2` 源码编译，带 #1233 PLE + same-chat rewind 两个引擎补丁）
+### Strata 0.2.7（2026-10-28 起 3080 在用；官方 tag `v0.2.7` 源码编译，四个本地补丁全部重打）
+
+* **版本命名**：`v0.2.7` 的 `CMakeLists.txt` 写 `project(strata VERSION 0.1.52)` → `strata --version` 打 **0.1.52**（官方发布说明：Control 和所有引擎包同为 0.1.52）。
+  本机逐字证据：引擎日志 `~/src/Strata/strata-davidau-iq3_s-q8ple.log` 里 `[strata] 2026-10-28 12:14:19 engine started: ... --serve ...` 之后是 `strata generate: session is up (engine 0.1.52)`。
+* **换法（2026-10-28 全流程实测）**：`v0.2.7.tar.gz`（31,148,786 B，走 4090 的 7897 代理，3080 自己那个 7897 没监听）解到 `~/src/Strata-0.2.7` → 打四个补丁 →
+  `bash ~/ubuntu_handoff/scripts_3080/build_strata_027_3080.sh`（16 核：engine 169 targets 约 3 分钟，顺带 `conversation_cache_test`）→
+  `bash ~/ubuntu_handoff/scripts_3080/build_vision_027_3080.sh`（275 targets 约 4 分钟）→ `bash ~/ubuntu_handoff/strata/deploy_027_3080.sh`（换 engine/vision/serve/tools + 重指软链 + import 自检）。
+  构建口径和 0.2.5 完全一样：`-DCMAKE_CUDA_ARCHITECTURES=86`、CUDA 用 `~/venvs/cuda-build` 里配对的 cu13 13.0/13.0（`~/venvs/sglang-0519` 现在是 nvcc 13.4 + CUDART 13.0 混装，
+  会被 cccl 判 `CUDA compiler and CUDA toolkit headers are incompatible`）、`-DFETCHCONTENT_SOURCE_DIR_STRATA_LLAMACPP=~/src/Strata/third_party/llama.cpp`
+  （0.2.7 的 `GIT_TAG` 仍是 `3cf03257f219`，与 0.2.2/0.2.5 同一个 commit；那份本地副本 `ggml+common+include` 逐文件 md5 汇总 `0b1cf35e622cb266b467aa2f17e5af35`，两边一致）。
+* **四个补丁在 0.2.7 上要不要重打：全都要，而且锚点一个没挪**（升级前逐字 grep，`v0.2.7` 源码里 `same_chat_rewind` 0 处、`drop_replaced` 0 处、`strata_conversation` 0 处、
+  `sampling_force` 0 处，PLE 那段还是 `ple_only = v->s == "strata-ple"` 加 `if (!ple_only &&`，**#1233 仍未修**）。打完之后：
+  `pg.tensors().size() == 1` 1 处、`same_chat_rewind` 4 处、`include/strata/core/conversation_cache.hpp` 里 `drop_replaced` 1 处、`serve/server.py` 里 `sampling_force` 13 处 + `strata_conversation` 1 处。
+  命令逐条：PLE 按锚点贴 6 行（`patch -p1/-p4` 都吃不下这个补丁的文件头，只能贴）；
+  `python3 -c "import pathlib,importlib.util as iu;s=iu.spec_from_file_location('al','patches/apply_local.py');m=iu.module_from_spec(s);s.loader.exec_module(m);m.apply_same_chat_rewind(pathlib.Path.home()/'src/Strata-0.2.7')"`
+  （两个锚点 `if (borrow && !pin_sibling && park_worth) {` 和 `(!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth` 在 0.2.7 里各恰好 1 处，函数自核）；
+  `python3 patches/apply_codex_side_request.py ~/src/Strata-0.2.7`；`python3 patches/port_pin_022.py ~/src/Strata-0.2.7`（**0.2.7 把 web chat 页面整个重写过，但引擎侧 sampling 合并那四段锚点没变，一次过，`py_compile` 也过**）。
+* **单测**：`build/conversation_cache_test` → `conversation_cache_test: 4839 checks passed`（0.2.5 那版同补丁是 4777，多出来的是 0.2.7 上游新增用例 + 我们补丁覆盖的那几条）。
+* **runtime 证据（这台 0.1.52 起来之后、跑完 8-512K 全表之后统计）**：
+  PLE 补丁 → `strata generate: PLE on, table 320001536 rows of .../Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-00002-of-00002.gguf` + `PLE direct read probe: 22078 rows/s (fine)`，整段日志 `duplicate split shard` **0 次**（不打补丁就是这条启动即崩）；
+  same-chat rewind → `conversation cache: same-chat rewind at 499716 (root 16384); not parking` 这类行 **294 次**（50 万 token 级别的分叉不占新槽）；
+  旁路请求补丁 → 二进制里 `dropped %zu replaced` 在，本轮运行 **0 次触发**（只有"同一线程的停放副本被替换"才打这行，本轮没遇到），覆盖它的是上面那个单测；
+  钉 sampling 补丁 → 代码在、`import serve.server` rc=0，但 3080 这份 json 没有 `sampling_force` 列表 ⇒ `svc.sampling_force = []`，**本机不生效**（想钉就在 json 里加 `"sampling_force": ["temperature","top_p","top_k"]` 再重启）。
+* **停放与 12 槽的真账（这台 62 G RAM、`resident 35.50 GiB page-locked`）**：`conversation cache: parked 375863 tokens in 4307.3 ms; parked=6 bytes=17475371968 evictions=6 snapshot_bytes=5501137608`
+  —— 单条约 5.50 GB，24 GiB 预算实际只装到 **parked=6**，过程驱逐 6 次；`skip parking ... 68 次`，样本行 `skip parking (8592 tokens, below the 18432 minimum; parked=0)`（短请求被 min-tokens 挡住，不顶长会话）。
+  所以"12 槽"在 3080 上只是上限，真容量由 `MemAvailable` 判；4090 单卡（专家进 48 G 显存、RAM 只花 prefill 补品）同一套旗杆能停得更满。
+* **和双 3080 有关的 0.2.7 上游修复**（发布说明逐条）：#1503 停放快照不再复用别的会话的 K/V；#3470/#3350 layer split 上每次数长冷 prompt 后第二张卡可用显存 shrinking 的 copy stream 泄漏；
+  #2409 显存快见底时恢复停放退回缓存而不是失败；#3350 存 checkpoint 撞 OOM 不再打死引擎。
+* **layer-major prefill**：CUDA 两张以上卡的 layer split **默认开**（`src/core/arch_defaults_test.cpp:402-405`：`prefill_layer_major_default(false, 2)` 真、`(false, 1)` 假），单卡仍 opt-in；
+  关：`STRATA_PREFILL_LAYER_MAJOR=0` 或 `STRATA_DEFAULTS=026`。官方只在 2×A4000（速度）和 2×A6000（质量）上测过，32K 首 token 141.8→27.7 s，**3080 这类卡官方没测**。
+  本机实测结论：这一版对双 3080 的收益在 **decode**，不在 prefill —— 见下面对比表，prefill t/s 各档反而 -1.5%~-7.0%。
+* **实测表（3080 双卡 512K，`launch_davidau_iq3s_q8ple_512k.sh`，脚本 `~/src/sdd3080/scripts/decode_ctx_tps.py --url http://127.0.0.1:8005 --model qwen-flash-next --tiers all --scenarios`；
+  tg 256、**runs=1**、`exact_tg`、thinking off、每档不 flush（strata 没有 `/flush_cache`）；`when 2026-10-28T13:04:01`，n_ctx 524288）**：
+
+```text
+------------------------------------------------------------------------------------------------------------------------------
+  tier    code   human    math   multi      qa     rag  reason    role    stem   write     AVG  |     pre_s  pre_min   pre_tps
+------------------------------------------------------------------------------------------------------------------------------
+    8k    84.7    92.7    76.3    86.3    92.6    94.0   119.6    96.7    98.1    90.7    93.2  |      4.7      0.08      1695
+   32k    93.1    95.6    79.2    83.9    96.2    86.8   106.8    98.0    98.0    91.1    92.9  |     12.2      0.20      2562
+   64k    93.7    96.3    81.6    90.9    92.7    87.4   119.2    95.7    99.9    95.7    95.3  |     21.4      0.36      2924
+  128k    84.2    94.9    73.7    87.1   101.4    83.6   113.4    88.3    88.3    93.4    90.8  |     39.9      0.67      3136
+  200k    88.0    98.7    78.1    88.2    98.4    83.9   105.6    86.2    90.9    90.5    90.8  |     61.1      1.02      3198
+  256k    88.5    91.7    70.1    86.8    98.2    86.3   109.3    89.3    88.3    91.2    90.0  |     75.6      1.26      3307
+  384k    82.9    75.5    66.4    79.9    82.0    71.8    86.7    89.2    80.8    83.6    79.9  |    117.8      1.96      3184
+  512k    83.6    87.1    79.4    78.5    79.2    75.3    99.6    77.8    79.9    78.1    81.8  |    158.0      2.63      3162
+------------------------------------------------------------------------------------------------------------------------------
+   AVG    87.3    91.6    75.6    85.2    92.6    83.6   107.5    90.2    90.5    89.3    89.3
+------------------------------------------------------------------------------------------------------------------------------
+```
+  原始 json：`~/ubuntu_handoff/results/davidau_027_512k_.json`，入库副本 [results/davidau_027_512k.json](results/davidau_027_512k.json)。
+* **对照 0.2.5 基线**（同机、同模型、同脚本、同采样口径，只差引擎版本；基线 `results/davidau_025_512k.json`，2026-10-25 20:00，**runs=3**）：
+
+```text
+------------------------------------------------------------------------------------------------------------------------------
+  tier   decode 0.2.5   decode 0.2.7      Δ%   |   pre_tps 0.2.5   pre_tps 0.2.7      Δ%   |  512K 整段冷读
+------------------------------------------------------------------------------------------------------------------------------
+    8k         93.3           93.2     -0.1%   |           1720          1695     -1.5%   |
+   32k         88.7           92.9     +4.7%   |           2441          2562     +4.9%   |
+   64k         85.7           95.3    +11.2%   |           3059          2924     -4.4%   |
+  128k         87.0           90.8     +4.4%   |           3341          3136     -6.1%   |
+  200k         83.3           90.8     +9.0%   |           3439          3198     -7.0%   |
+  256k         80.8           90.0    +11.4%   |           3382          3307     -2.2%   |
+  384k         78.6           79.9     +1.6%   |           3360          3184     -5.2%   |
+  512k         74.6           81.8     +9.7%   |           3227          3162     -2.0%   | 154.9 s -> 158.0 s
+------------------------------------------------------------------------------------------------------------------------------
+   AVG         84.0           89.3     +6.3%
+------------------------------------------------------------------------------------------------------------------------------
+```
+  读法：decode 全表 AVG **84.0 → 89.3（+6.3%）**，长上下文最明显（256k +11.4%、64k +11.2%、200k +9.0%、512k +9.7%），8k 持平（-0.1%）；
+  prefill 每档都略降（512K 整段冷读 154.9 s → 158.0 s）。**记账**：0.2.7 这轮是 `runs=1`，没估 run-to-run 波动；基线是 3 轮均值。要钉死 +6.3% 得把 0.2.7 重跑到 3 轮。
+  另外 0.2.7 换了 Ampere 一档的求和顺序（`STRATA_DEFAULTS=026` 可退回），答案措辞会与 0.2.5 / 0.2.2 基线不一致，跨版本不要按逐字输出对比。
+* **回滚**：`engine/strata.bak-20261028-025`（= 0.1.50）、`engine/strata-vision.bak-20261028-025`，serve 与 tools 的 0.2.5 份在 `~/src/old/Strata-runtime-0.2.5-20261028/`；
+  软链改回 `../Strata-0.2.5/strata_control`、`../Strata-0.2.5/strata_cli` 即可。构建日志 `~/src/build-027-3080.log`、`~/src/build-027-vision-3080.log`。
+
+### Strata 0.2.2（4090 运行目录仍是这一套；2026-10-21 起官方 tag `v0.2.2` 源码编译，带 #1233 PLE + same-chat rewind 两个引擎补丁）
 
 * **版本命名坑（先说，别对着 `--version` 找 0.2.2）**：官方 tag `v0.2.2` 的 `CMakeLists.txt:11` 还是 `project(strata VERSION 0.1.47)`，
   `STRATA_VERSION` 取 `PROJECT_VERSION` → `strata --version` 打 **0.1.47**；`engine/BUILD.json` 里甚至是上一版留下的 `"version": "0.1.45"`
