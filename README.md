@@ -2,16 +2,16 @@
 
 Reproduce the dual RTX 3080 20GB + 64 GB Strata launches in this folder. This file is for an agent, not a human. Paths below are the reference PC unless remapped.
 
-**当前状态（2026-10-28）**：**3080 已升到官方 tag `v0.2.7`**（`CMakeLists.txt` 是 `project(strata VERSION 0.1.52)` → `strata --version` 打 **0.1.52**），
-四个本地补丁全部在 0.2.7 上重打（锚点一个没挪，逐字复核见「Strata 0.2.7」一节）；**4090 运行目录仍是 `v0.2.2`（0.1.47）**，现在跑的是 NVFP4-GPTQ 那份 512K
+**当前状态（2026-11-09）**：**3080 已升到官方 tag `v0.2.12`**（`strata --version` = `0.1.58`），本机 sm_86 编译，本地补丁 3 个 + PR #4621 backport，Codex 旁路（conv）已全线下线，ngram 手术完成（自带 q4 表已删，省 28.8G）——全在「Strata 0.2.12」一节；0.2.7 的历史记录保留原位。
+本地补丁现为 4 个：PLE #1233 / same-chat rewind / sampling_force（钉 1.0）/ PR #4621 backport（serve 认 codex 的 tool_search_call）。
 （`launch_nvfp4_gptq_512k.sh`，模型名仍 `qwen-flash-next`，停放旗杆与 3080 一致），它那个 user unit `strata-swift.service` 目前指 `~/src/Strata-0.2.4/run-deepseek-v4.1-flash-ist-das-2.00bpw.sh`（当前 inactive）。
 两台跑法：ctx 524288 + `--rope-scaling yarn --rope-scale 2`、`--kv k8v4`、`--resident-experts`、`--pipeline-windows 2`、单流、vision gpu、`effort_position: "end"`、旗杆 `6×16384`；
 3080 `--prefill 16384 --layer-split 26`（双卡），4090 `--prefill 32768`（单卡）。模型仍是 **DavidAU Qwen3.8-Flash-Next GSQ-RCO abliterated IQ3_S**，
 n-gram 用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/rt`。
-停放（2026-10-25 / 10-27 两台一起改成同一套）：`--conversation-cache-mib 24576 --conversation-cache-slots 12 --conversation-cache-min-tokens 18432 --conversation-cache-min-free-mib 2560 --conversation-cache-park-gain 16384`。
-温度：3080 这份 json 有 `sampling`（`1.0/0.95/20`）但**没有**顶层 `sampling_force` 列表 → 钉 sampling 补丁在 3080 上只当默认值、不压请求（`/props` 实测 `default_generation_settings` = `1.0/0.95/20`，与 model card 相同）；
-4090 的 davidau 那份钉 `0.9/0.95/20`，nvfp4 那份两个键都没有 → 走 model card。
-3080 @ 0.2.7 的 8-512K 实测表在下面「Strata 0.2.7」一节：`results/davidau_027_512k.json`，对照的 0.2.5 基线 `results/davidau_025_512k.json`（同机同模型同脚本，只有引擎版本不同）。
+停放（2026-11-09 两台统一改小）：`--conversation-cache-mib 24576 --conversation-cache-slots 24 --conversation-cache-min-tokens 18432 --conversation-cache-min-free-mib 2560 --conversation-cache-park-gain 16384`（11-09 前 slots 12）。
+温度：2026-11-09 起两台都钉 `1.0/0.95/20`，json 顶层 `sampling_force` **列表**点键 + serve 本地补丁（`sampling_force` 13 处），旧的 `"force": true` 布尔形态已废；客户端传什么都改不动。
+4090 的 davidau 那份同步钉 1.0（`apply_adaptive_mtp.py` 同一份生成器）。
+3080 @ 0.2.7 的 8-512K 实测表在下面「Strata 0.2.7」一节：`results/davidau_027_512k.json`，对照的 0.2.5 基线 `results/davidau_025_512k.json`（同机同模型同脚本，只有引擎版本不同）。；**0.2.12 未跑十类 bench**（当日只做了质量循环巡检 12×2 发，`scripts/ngram_looptest.py`，全绿）。
 
 **IQ3_XXS** (`launch_swift_iq3xxs.sh`): full RAM arena, ~70–80 tok/s decode on this box. Quant fits 64 GB.
 
@@ -19,6 +19,42 @@ n-gram 用外挂 **sleepyeldrazi Q8_0 PLE**（`--ple-gguf`），MTP 沿用 `mtp/
 
 
 ## 版本实测（按引擎版本；每版本 = model / ngram / script / 该版本实测表）
+
+### Strata 0.2.12（2026-11-09 起 3080 在用；官方 tag `v0.2.12`，`strata --version` = `0.1.58`）
+
+* **怎么编**：`bash compile_engine_0212.sh`（engine + conversation 单测 + vision 一条龙）。要点：
+  `-DCMAKE_CUDA_ARCHITECTURES=86`、nvcc 用 `~/venvs/cuda-build` 里的 cu13（13.0.88）+ `-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK`；
+  **conversation 单测有自己的独立开关** `-DSTRATA_BUILD_CONVERSATION_TESTS=ON`（默认 OFF，`STRATA_BUILD_TESTS` 不带它）；
+  pinned llama.cpp（`3cf03257f219`，与 0.2.2/0.2.7 同一个 commit）走 gh-proxy 的 **commit zip** 解到 `$S/_llamacpp`
+  再 `-DSTRATA_GGML_DIR` 指过去——CMake 缺省会 `git clone` 全史，直连 GitHub 十几分钟起步（今天在这坑上过）。
+  **v0.2.13 起上游把 ggml 挪进 `third_party/strata-ggml`，编译不再需要 llama.cpp 下载**，这个技巧届时作废。
+* **卡死教训（同日实录）**：第一次 `-j 16` 编译 + 引擎挂着（24G 停放钉 RAM）→ 62G 物理内存被两头抽干，整机僵死只能线下重启。
+  现在脚本里 `-j 8` + 起跑闸门 `MemAvailable ≥ 25G` 才编，且编译期间不加载引擎。
+* **补丁（4 个）**：
+  1. PLE #1233、2. same-chat rewind、3. sampling_force —— 源码与二进制状态与 4090 完全一致（升级当日逐文件核对：
+     两棵树除 `generate.cpp` / `serve/server.py` 外全部字节相同，故这两个文件直接从 4090 打好补丁的版本同步，锚点零改动）；
+     旧 apply 脚本（0.1.38 系锚点）在 0.2.12 上套不动，别再硬跑。
+  4. **PR #4621 backport**（上游未合并、0.2.13 也未收）：`patch -p1 --fuzz=2 < patches/pr4621-responses-tool-search.diff`，
+     改 `serve/responses.py`（+17 处 tool_search）、`serve/server.py`（2 hunk）、`serve/test_responses.py`（+5 测试）、`docs/DETAILS.md`；
+     纯 Python 不需重编。用途：codex 0.144+ 开 `supports_search_tool` 后历史里带 `tool_search_call/tool_search_output` item，
+     0.2.12/0.2.13/主干都会 400 拒（`input items of type ... are not supported`，`serve/responses.py:200`），打了才免疫。
+     配套防线：magpie 每次改 provider 会重写 `~/.codex/magpie-models.json` 把 `supports_search_tool` 覆盖回 True——
+     重跑 `~/ubuntu_handoff/scripts/magpie_catalog_fix.py`（False + `multi_agent_version=v1`），codex 重启并新会话才吃到。
+  * Codex 旁路（`strata_conversation`/`drop_replaced`）已全线下线：用的 4090 还原后源码，源码/二进制 conv=0。
+* **单测基线**：`conversation_cache_test: 4842 checks passed`（0.2.7 的 4847 减 5 项 conv 检查 = 上游基线）；
+  `serve.test_responses`: 48 tests OK (skipped=1)（含 PR 自带 5 项 tool_search）。
+* **ngram 手术（2026-11-09，省 28.8G）**：DavidAU 包里 `00002-of-00002` = **单张量 `per_layer_token_embd.weight`（q4，28.8G）**，
+  即模型自带 ngram；实际用的是外挂 sleepyeldrazi **Q8_0 PLE**（54.4G，`--ple-gguf`，不动）。
+  上游装载器 `include/strata/artifact/gguf_reader.hpp` 的 `validate_split()`：文件名带 `-of-` 就聚合姊妹片并强校验
+  `split.count/no/tensors.count` 一致；**单文件且 `split.count<=1` 直接放行**（`tensors.count` 都不看）。所以手术 =
+  ① 把 00001 头部 `split.count`（u16，本次偏移 `11163437`，换包要先用解析器重新定位）2→1 等长改写；
+  ② 把 00001 **改名去掉 `-of-` 模式**（`...-IQ3_S-00001-of-00002.gguf` → `...-IQ3_S.gguf`，同盘 mv 零代价）；
+  ③ 运行 json 两处路径同步（`example-strata-davidau-iq3_s-q8ple.json` 已是术后现版）；launch 脚本无 00001 引用（3080 版不 glob 主分片）。
+  术后 `rm 00002` → 盘 24G→**58G** 可用。验收：重启 health 200、`scripts/ngram_looptest.py` 删前删后各 12 发全绿
+  （判"说话循环"：字符级 12-gram 重复率 + 精确最长重复片段；推理题共用 LaTeX、吐槽体复沓这类**会误报**，要人工看 /tmp 存档全文）；
+  codex 续会话 `reused 99.8%`，claude `/v1/messages` 200。
+* **运行参数现值**：slots 24、temperature 1.0（force 列表钉）、launch env `STRATA_UNDECLARED_TOOL_CALLS=call`（上游 #4622，非补丁）。
+  systemd：`strata-swift.service` override → `launch_davidau_iq3s_q8ple_512k.sh`，装载 135–145 s 到 health。
 
 ### Strata 0.2.7（2026-10-28 起 3080 在用；官方 tag `v0.2.7` 源码编译，四个本地补丁全部重打）
 

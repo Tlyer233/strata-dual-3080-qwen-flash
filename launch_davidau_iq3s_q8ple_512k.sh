@@ -6,7 +6,8 @@
 # Dual-GPU: gpus=1,0 split=26, prefill 8192, adaptive MTP, pipeline-windows 2.
 # 512K 版: ctx 524288 + YaRN x2 (--rope-scaling yarn --rope-scale 2, 官方 >262K 口径), 停放 3 槽.
 # 依据: Strata DETAILS.md yarn 实测 (IQ3_S: 293K NLL 2.04 vs 裸 2.22, <=32K 无退化, 421K yarn2 QA 8/8).
-# 温度: 不特殊处理, apply_adaptive_mtp.py 每次写卡片 thinking 值 1.0/0.95/20 + force=true (用户定: 其他默认).
+# 温度: 不特殊处理, apply_adaptive_mtp.py 每次写卡片 thinking 值 0.9/0.95/20 + force=true (2026-10-28 用户定: 与 4090 一致;
+#        json 里的 sampling_force 钉住这几项, 客户端改不掉).
 # effort_position=end 写在 json 里 (只改 effort 的请求不重读, 实测 9528 reused / 0.2 s).
 set -euo pipefail
 ROOT="${STRATA_ROOT:-$HOME/src/Strata}"
@@ -22,6 +23,7 @@ PLE="${PLE_GGUF:-$HOME/models/sleepyeldrazi/Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-
 ROPE_SCALING="${ROPE_SCALING:-yarn}"
 ROPE_SCALE="${ROPE_SCALE:-2}"
 RUN="${RUN:-$ROOT/run-davidau-iq3s-q8ple.sh}"
+export STRATA_UNDECLARED_TOOL_CALLS="${STRATA_UNDECLARED_TOOL_CALLS:-call}"  # #4622: 未声明名的成形式调用按 call 返回, 客户端可用 unknown tool 重试
 CFG="${CFG:-$ROOT/strata-davidau-iq3_s-q8ple.json}"
 CUDA_PIP="$HOME/venvs/sglang-0519/lib/python3.12/site-packages/nvidia/cu13"
 HAND="$HOME/ubuntu_handoff/strata"
@@ -96,7 +98,8 @@ fi
 #   every 131072 的代价: 回退/分支最多重读 128K token (~55 s); 线性 agent 轮次不受影响.
 #
 # --- 旗杆(检查点) vs 停放(slot), 别混 ---
-# 停放 --conversation-cache-slots: 整段会话 KV 拷到内存, 换会话用. 本机 3 槽.
+# 停放 --conversation-cache-slots: 整段会话 KV 拷到内存, 换会话用. 本机 12 槽（2026-10-25 从 2 提到 12，
+#   预算 CONV_CACHE_MIB 仍是 24576 MiB 不变：槽数是上限，能不能停满由那 24 GiB 和 min-free 2560 判）。
 # 旗杆 --prompt-cache: 同一段对话路上的存档, 分叉时退到最近一根再走.
 #   官方口径 (~118 MB 宿主 RAM / 根, 不占显存). KV 仍只在 GPU 里留当前那一局.
 #   本机 14 根 ≈ 1.6 GiB RAM. 多插几根 = 加大 PROMPT_CACHE_N, 只吃内存.
@@ -147,8 +150,12 @@ fi
 # 旗杆官方 6x16384。停放：切 slot 用，mib=0 就是换会话全量 prefill。3080 三槽。
 PROMPT_CACHE_N="${PROMPT_CACHE_N:-6}"
 PROMPT_CACHE_EVERY="${PROMPT_CACHE_EVERY:-16384}"
-CONV_CACHE_MIB="${CONV_CACHE_MIB:-16384}"
-CONV_CACHE_SLOTS="${CONV_CACHE_SLOTS:-3}"
+# 停放实测 (2026-10-22, 本机 3080 双卡 + 62 G): 单条 451876 token 快照 = 6.00 GiB (13.9 KB/token), park 3.8-4.5 s;
+#   停 2 条 -> parked 14.24 GiB / MemAvailable 3.6 GiB / swap 已打满; 第 3 条要 6.0 GiB + 2560 MiB floor, RAM 不给
+#   (实测第 3 条 prefill 从 153 s 拖到 >170 s)。槽定 2, 预算 24576 用不满只是留余量。
+#   来回切命中停放: restored 451864 tokens in ~650 ms, 整次切换 1.0-1.6 s (对照新建 452K = 153 s)。
+CONV_CACHE_MIB="${CONV_CACHE_MIB:-24576}"
+CONV_CACHE_SLOTS="${CONV_CACHE_SLOTS:-12}"
 CONV_CACHE_MIN_TOKENS="${CONV_CACHE_MIN_TOKENS:-18432}"
 CONV_CACHE_MIN_FREE_MIB="${CONV_CACHE_MIN_FREE_MIB:-2560}"
 CCPY_BIN="$ROOT/.venv/bin/python"
@@ -241,7 +248,9 @@ unset STRATA_STAGE_PIN
 unset STRATA_GDN_CHUNKED
 # 专家 RAM 层给停放让路 (官方 A/B 臂, 源码 2609 行; 默认 4 GiB -> 本机 available 只剩 4.4 G,
 #   一条 500K 快照 6.93 G 停不下 -> 0 reused 整段重读 190 s)。decode 命中率掉多少要实测。
-export STRATA_RESIDENT_HEADROOM_GIB="${STRATA_RESIDENT_HEADROOM_GIB:-20}"
+# 2026-11-05 (0.2.10 实测): 20 -> 12。8k AVG 87.3 -> 97.6 t/s (+11.8%)，RAM 驻留 27.40 -> 37.66 GiB；
+#   再降到 8 无增益（驻留仍是 37.66、AVG 95.0）。回退: 改回 20。
+export STRATA_RESIDENT_HEADROOM_GIB="${STRATA_RESIDENT_HEADROOM_GIB:-12}"
 export STRATA_PREFILL_HELP="${STRATA_PREFILL_HELP:-1}"
 export STRATA_PREFILL_CPU_SHARE="${STRATA_PREFILL_CPU_SHARE:-auto}"
 export STRATA_PREFILL_CPU_SHARE_MAX="${STRATA_PREFILL_CPU_SHARE_MAX:-3072}"

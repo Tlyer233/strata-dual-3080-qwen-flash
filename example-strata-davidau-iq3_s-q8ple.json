@@ -4,7 +4,7 @@
   "--pack",
   "/home/xi/src/Strata-data/packs/davidau-gsq-rco-iq3_s",
   "--native",
-  "/home/xi/models/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S-00001-of-00002.gguf",
+  "/home/xi/models/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S.gguf",
   "--expert-profile",
   "/home/xi/src/Strata/data/expert-profile.bin",
   "--vision",
@@ -42,9 +42,9 @@
   "--prompt-cache-every",
   "16384",
   "--conversation-cache-mib",
-  "16384",
+  "24576",
   "--conversation-cache-slots",
-  "3",
+  "12",
   "--conversation-cache-min-tokens",
   "18432",
   "--conversation-cache-min-free-mib",
@@ -55,8 +55,9 @@
  "model_name": "qwen-flash-next",
  "log": "/home/xi/src/Strata/strata-davidau-iq3_s-q8ple.log",
  "lib_dirs": [
-  "/home/xi/venvs/sglang-0519/lib/python3.12/site-packages/nvidia/cu13/bin",
-  "/home/xi/venvs/sglang-0519/lib/python3.12/site-packages/nvidia/cu13/lib64"
+  "/home/xi/venvs/cuda-build/lib/python3.14/site-packages/nvidia/cu13/bin",
+  "/home/xi/venvs/cuda-build/lib/python3.14/site-packages/nvidia/cu13/lib",
+  "/home/xi/venvs/cuda-build/lib/python3.14/site-packages/nvidia/cu13/lib64"
  ],
  "port": 8005,
  "gpu": [
@@ -71,7 +72,7 @@
  "vision": {
   "exe": "/home/xi/src/Strata/engine/strata-vision",
   "mmproj": "/home/xi/models/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
-  "model": "/home/xi/models/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S-00001-of-00002.gguf",
+  "model": "/home/xi/models/DavidAU/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S.gguf",
   "gpu": true,
   "max_tokens": 1024
  },
@@ -82,8 +83,17 @@
   "top_k": 20,
   "min_p": 0.0,
   "presence_penalty": 0.0,
-  "repetition_penalty": 1.0,
-  "force": true
+  "frequency_penalty": 0.0,
+  "repetition_penalty": 1.0
  },
- "effort_position": "end"
+ "effort_position": "end",
+ "sampling_force": [
+  "temperature",
+  "top_p",
+  "top_k",
+  "min_p",
+  "presence_penalty",
+  "frequency_penalty",
+  "repetition_penalty"
+ ]
 }
